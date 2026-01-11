@@ -1,6 +1,8 @@
 package keygen
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -14,100 +16,79 @@ import (
 	"time"
 )
 
-type LicensePayload struct {
+const privateKeyPath = "private.pem"
+
+type LicenseData struct {
 	MachineID string `json:"machine_id"`
-	Expiry    int64  `json:"expiry"`
+	ExpiryUTC int64  `json:"expiry_utc"`
 }
 
-// 生成 RSA 密钥对（若不存在）
+type License struct {
+	Data      string `json:"data"`
+	Signature string `json:"signature"`
+}
+
 func GenerateKeyPair() error {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return err
 	}
-
-	privBytes := x509.MarshalPKCS1PrivateKey(key)
-	pubBytes := x509.MarshalPKCS1PublicKey(&key.PublicKey)
-
-	if err := writePem("backend/private.pem", "RSA PRIVATE KEY", privBytes); err != nil {
-		return err
-	}
-	if err := writePem("backend/public.pem", "RSA PUBLIC KEY", pubBytes); err != nil {
-		return err
-	}
-	return nil
-}
-
-func writePem(path, t string, b []byte) error {
-	f, err := os.Create(path)
+	f, err := os.OpenFile(privateKeyPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
 	return pem.Encode(f, &pem.Block{
-		Type:  t,
-		Bytes: b,
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
 }
 
-// 生成激活码
 func GenerateLicense(machineID, expiry string) (string, error) {
-	if machineID == "" {
-		return "", errors.New("machine_id empty")
-	}
-	if expiry == "" {
-		return "", errors.New("expiry empty")
+	if machineID == "" || expiry == "" {
+		return "", errors.New("missing field")
 	}
 
-	// YYYY-MM-DD
 	t, err := time.Parse("2006-01-02", expiry)
 	if err != nil {
 		return "", err
 	}
 
-	payload := LicensePayload{
+	data, _ := json.Marshal(LicenseData{
 		MachineID: machineID,
-		Expiry:   t.Unix(),
-	}
+		ExpiryUTC: t.Add(24*time.Hour - time.Second).UTC().Unix(),
+	})
 
-	data, _ := json.Marshal(payload)
-
-	// SHA256
-	hash := sha256.Sum256(data)
-
-	// 读取私钥
-	privPem, err := os.ReadFile("backend/private.pem")
+	privPem, err := os.ReadFile(privateKeyPath)
 	if err != nil {
 		return "", err
 	}
 
 	block, _ := pem.Decode(privPem)
 	if block == nil {
-		return "", errors.New("invalid private key")
+		return "", errors.New("bad private key")
 	}
 
-	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err != nil {
 		return "", err
 	}
 
-	// ✅ 正确的签名方式
-	signature, err := rsa.SignPKCS1v15(
-		rand.Reader,
-		privKey,
-		crypto.SHA256,
-		hash[:],
-	)
+	hash := sha256.Sum256(data)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hash[:])
 	if err != nil {
 		return "", err
 	}
 
-	license := map[string]string{
-		"data": base64.StdEncoding.EncodeToString(data),
-		"sig":  base64.StdEncoding.EncodeToString(signature),
-	}
+	lic, _ := json.Marshal(License{
+		Data:      base64.StdEncoding.EncodeToString(data),
+		Signature: base64.StdEncoding.EncodeToString(sig),
+	})
 
-	out, _ := json.Marshal(license)
-	return base64.StdEncoding.EncodeToString(out), nil
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	gz.Write(lic)
+	gz.Close()
+
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }

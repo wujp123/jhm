@@ -12,9 +12,9 @@ import (
 const ApiToken = "CHANGE_ME_SECRET"
 
 func main() {
-	// ✅ 启动时确保私钥存在（不阻塞、不读 stdin）
+	// ✅ 启动阶段不阻塞、不读 stdin
 	if _, err := os.Stat("private.pem"); os.IsNotExist(err) {
-		log.Println("⚠️ 未检测到私钥，自动生成...")
+		log.Println("🔐 private.pem not found, generating...")
 		if err := keygen.GenerateKeyPair(); err != nil {
 			log.Fatal(err)
 		}
@@ -26,16 +26,13 @@ func main() {
 	}
 
 	http.HandleFunc("/", index)
-	http.HandleFunc("/health", health)
+	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("OK"))
+	})
 	http.HandleFunc("/api/generate", generate)
 
 	log.Println("Listening on :" + port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
-}
-
-func health(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(200)
-	w.Write([]byte("OK"))
 }
 
 func index(w http.ResponseWriter, _ *http.Request) {
@@ -46,13 +43,10 @@ func index(w http.ResponseWriter, _ *http.Request) {
 <head><title>激活码生成</title></head>
 <body>
 <h2>生成激活码</h2>
-
 机器码：<input id="m"><br><br>
 到期日：<input id="e" type="date"><br><br>
 <button onclick="gen()">生成</button>
-
 <pre id="r"></pre>
-
 <script>
 function gen(){
 fetch('/api/generate',{
@@ -60,12 +54,10 @@ fetch('/api/generate',{
 	headers:{'Content-Type':'application/json'},
 	body:JSON.stringify({
 		token:'CHANGE_ME_SECRET',
-		machine_id:document.getElementById('m').value,
-		expiry:document.getElementById('e').value
+		machine_id:m.value,
+		expiry:e.value
 	})
-}).then(r=>r.text()).then(t=>{
-	document.getElementById('r').innerText=t
-})
+}).then(r=>r.text()).then(t=>r.innerText=t)
 }
 </script>
 </body>
@@ -79,13 +71,10 @@ func generate(w http.ResponseWriter, r *http.Request) {
 		MachineID string `json:"machine_id"`
 		Expiry    string `json:"expiry"`
 	}
-
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", 400)
 		return
 	}
-
-	log.Printf("REQ machine=%q expiry=%q\n", req.MachineID, req.Expiry)
 
 	if req.Token != ApiToken {
 		http.Error(w, "unauthorized", 403)
