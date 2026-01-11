@@ -45,6 +45,7 @@ type HistoryRecord struct {
 	GenerateTime string `json:"generate_time"`
 	MachineID    string `json:"machine_id"`
 	ExpiryDate   string `json:"expiry_date"`
+	LicenseCode  string `json:"license_code"`
 }
 
 // ================= 全局存储 =================
@@ -81,9 +82,8 @@ func main() {
 
 // ================= HTTP 处理函数 =================
 
-// 1. 生成页面
+// 1. 生成页面 (这里不使用 fmt.Sprintf，所以 % 不需要转义)
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	// 这里的 CSS 不需要改，因为没有用 fmt.Sprintf，直接输出字节流是安全的
 	htmlContent := `
 <!DOCTYPE html>
 <html>
@@ -104,8 +104,28 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         button { width: 100%; padding: 14px; background: #0071e3; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
         button:hover { background: #0077ed; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #result { margin-top: 25px; padding: 15px; background: #1d1d1f; color: #fff; border-radius: 8px; font-family: monospace; word-break: break-all; display: none; line-height: 1.5; }
-        .error { background: #ffe5e5 !important; color: #d70015 !important; border: 1px solid #ff3b30; }
+
+        #result-container { display: none; margin-top: 25px; }
+        .result-label { font-size: 12px; color: #888; margin-bottom: 5px; display: flex; justify-content: space-between; }
+        #result {
+            padding: 15px;
+            background: #1d1d1f;
+            color: #fff;
+            border-radius: 8px;
+            font-family: monospace;
+            word-break: break-all;
+            line-height: 1.5;
+            cursor: pointer;
+            position: relative;
+            transition: background 0.2s;
+        }
+        #result:hover { background: #333; }
+        #result:active { transform: scale(0.99); }
+        .copy-hint { font-size: 12px; color: #aaa; }
+
+        .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: white; padding: 10px 20px; border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+        .toast.show { opacity: 1; }
+        .error { background: #ffe5e5 !important; color: #d70015 !important; border: 1px solid #ff3b30; cursor: default !important; }
     </style>
 </head>
 <body>
@@ -128,8 +148,18 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             <input type="date" id="date">
         </div>
         <button onclick="generate()" id="btn">生成激活码</button>
-        <div id="result"></div>
+
+        <div id="result-container">
+            <div class="result-label">
+                <span>生成结果：</span>
+                <span class="copy-hint">📋 点击下方黑色区域即可复制</span>
+            </div>
+            <div id="result" onclick="copyResult()"></div>
+        </div>
     </div>
+
+    <div id="toast" class="toast">已复制到剪贴板 ✅</div>
+
     <script>
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);
@@ -149,14 +179,16 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         }
 
         async function generate() {
+            const container = document.getElementById('result-container');
             const resDiv = document.getElementById('result');
             const btn = document.getElementById('btn');
             const token = document.getElementById('token').value;
             localStorage.setItem('license_token', token);
-            resDiv.style.display = 'block';
+            container.style.display = 'block';
             resDiv.innerText = "生成中...";
             resDiv.className = '';
             btn.disabled = true;
+
             try {
                 const response = await fetch('/api/generate', {
                     method: 'POST',
@@ -170,16 +202,36 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
                 const text = await response.text();
                 if (response.ok) {
                     resDiv.innerText = text;
+                    resDiv.onclick = copyResult;
                 } else {
                     resDiv.innerText = "❌ 错误: " + text;
                     resDiv.className = 'error';
+                    resDiv.onclick = null;
                 }
             } catch (err) {
                 resDiv.innerText = "❌ 网络请求失败: " + err;
                 resDiv.className = 'error';
+                resDiv.onclick = null;
             } finally {
                 btn.disabled = false;
             }
+        }
+
+        function copyResult() {
+            const text = document.getElementById('result').innerText;
+            if (!text || text.startsWith("生成中") || text.startsWith("❌")) return;
+            navigator.clipboard.writeText(text).then(() => {
+                showToast("已复制激活码 ✅");
+            }).catch(() => {
+                alert("复制失败，请手动复制");
+            });
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 2000);
         }
     </script>
 </body>
@@ -189,7 +241,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(htmlContent))
 }
 
-// 2. 历史记录页面 (修复了 % 符号导致的格式化错误)
+// 2. 历史记录页面 (修复版：所有 CSS 中的 % 都已转义为 %%)
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token != SecurityToken {
@@ -206,15 +258,35 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 	rows := ""
 	for i := len(records) - 1; i >= 0; i-- {
 		rec := records[i]
+
+		shortCode := rec.LicenseCode
+		if len(shortCode) > 12 {
+			shortCode = shortCode[:12] + "..."
+		}
+		if shortCode == "" {
+			shortCode = "(无数据)"
+		}
+
+		// 这里的 row 数据插入是安全的，不涉及 %
 		rows += fmt.Sprintf(`
             <tr>
                 <td>%s</td>
                 <td class="mid">%s</td>
                 <td>%s</td>
-            </tr>`, rec.GenerateTime, rec.MachineID, rec.ExpiryDate)
+                <td class="code-col">
+                    <span class="code-preview">%s</span>
+                    <button class="copy-btn" onclick="copyText('%s')">复制</button>
+                </td>
+            </tr>`,
+            rec.GenerateTime,
+            rec.MachineID,
+            rec.ExpiryDate,
+            shortCode,
+            rec.LicenseCode,
+        )
 	}
 
-	// ⚠️ 重点修复：这里的 width: 100%%; 使用了双 %，防止 fmt.Sprintf 报错
+	// ⚠️ 修复：CSS 中的 % 改为 %%
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
@@ -223,17 +295,40 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>生成记录</title>
     <style>
-        body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background: #f5f5f7; }
+        body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; background: #f5f5f7; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         .header { display: flex; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 10px; }
         h2 { margin: 0; color: #333; flex-grow: 1; text-align: center; }
         .back-btn { color: #0071e3; text-decoration: none; font-weight: bold; }
-        /* 这里的 100%% 是关键 */
-        table { width: 100%%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
-        th { text-align: left; color: #888; font-weight: 500; padding: 10px; border-bottom: 1px solid #eee; }
-        td { padding: 12px 10px; border-bottom: 1px solid #f5f5f5; color: #333; }
-        .mid { font-family: monospace; color: #0070f3; word-break: break-all; }
+
+        /* 修复：100%% */
+        table { width: 100%%; border-collapse: collapse; margin-top: 10px; font-size: 14px; table-layout: fixed; }
+        th { text-align: left; color: #888; font-weight: 500; padding: 10px; border-bottom: 1px solid #eee; white-space: nowrap; }
+        td { padding: 12px 10px; border-bottom: 1px solid #f5f5f5; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .mid { font-family: monospace; color: #0070f3; }
+        .code-col { display: flex; align-items: center; justify-content: space-between; }
+        .code-preview { font-family: monospace; color: #666; background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+        .copy-btn {
+            background: white; border: 1px solid #d2d2d7; color: #333;
+            padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+            margin-left: 8px; transition: all 0.2s;
+        }
+        .copy-btn:hover { background: #f5f5f7; border-color: #999; }
+        .copy-btn:active { background: #e5e5e5; }
+
         tr:hover { background-color: #f9f9fa; }
+
+        /* 修复：-50%% */
+        .toast { position: fixed; bottom: 20px; left: 50%%; transform: translateX(-50%%); background: rgba(0,0,0,0.8); color: white; padding: 10px 20px; border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
+        .toast.show { opacity: 1; }
+
+        @media (max-width: 600px) {
+            th:nth-child(1), td:nth-child(1) { width: 80px; font-size: 12px; }
+            th:nth-child(2), td:nth-child(2) { display: none; }
+            th:nth-child(3), td:nth-child(3) { width: 90px; }
+        }
     </style>
 </head>
 <body>
@@ -246,9 +341,10 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
         <table>
             <thead>
                 <tr>
-                    <th style="width: 180px;">生成时间 (北京)</th>
+                    <th style="width: 150px;">生成时间</th>
                     <th>机器码</th>
-                    <th style="width: 120px;">到期时间</th>
+                    <th style="width: 100px;">到期时间</th>
+                    <th style="width: 160px;">激活码</th>
                 </tr>
             </thead>
             <tbody>
@@ -256,6 +352,22 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
             </tbody>
         </table>
     </div>
+
+    <div id="toast" class="toast">已复制 ✅</div>
+
+    <script>
+        function copyText(text) {
+            if (!text) return;
+            navigator.clipboard.writeText(text).then(() => {
+                const toast = document.getElementById('toast');
+                toast.classList.add('show');
+                setTimeout(() => toast.classList.remove('show'), 2000);
+            }).catch(err => {
+                alert('复制失败');
+                console.error(err);
+            });
+        }
+    </script>
 </body>
 </html>
 `, len(records), rows)
@@ -287,7 +399,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	saveRecord(req.MachineID, req.Expiry)
+	saveRecord(req.MachineID, req.Expiry, code)
 	w.Write([]byte(code))
 }
 
@@ -342,7 +454,7 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 
 // ================= 存储 =================
 
-func saveRecord(mid, expiry string) {
+func saveRecord(mid, expiry, code string) {
 	mutex.Lock()
 	defer mutex.Unlock()
 	now := time.Now()
@@ -353,6 +465,7 @@ func saveRecord(mid, expiry string) {
 		GenerateTime: now.Format("2006-01-02 15:04:05"),
 		MachineID:    mid,
 		ExpiryDate:   expiry,
+		LicenseCode:  code,
 	})
 	file, _ := os.Create(historyFile)
 	json.NewEncoder(file).Encode(historyList)
