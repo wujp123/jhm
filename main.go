@@ -41,43 +41,38 @@ type GenerateRequest struct {
 	Expiry    string `json:"expiry"`
 }
 
-// 新增：历史记录结构
 type HistoryRecord struct {
-	GenerateTime string `json:"generate_time"` // 生成时间
-	MachineID    string `json:"machine_id"`    // 机器码
-	ExpiryDate   string `json:"expiry_date"`   // 到期时间
+	GenerateTime string `json:"generate_time"`
+	MachineID    string `json:"machine_id"`
+	ExpiryDate   string `json:"expiry_date"`
 }
 
-// ================= 全局存储 (简单的内存+文件存储) =================
+// ================= 全局存储 =================
 
 var (
 	historyList []HistoryRecord
-	historyFile = "history.json" // 数据存储文件
-	mutex       sync.Mutex       // 互斥锁，防止并发写入冲突
+	historyFile = "history.json"
+	mutex       sync.Mutex
 )
 
 // ================= 主程序入口 =================
 
 func main() {
-	// 0. 启动时加载历史记录
 	loadHistory()
 
-	// 1. 检查私钥
 	if os.Getenv("PRIVATE_KEY") == "" {
 		log.Println("⚠️  警告: 环境变量 PRIVATE_KEY 未设置！")
 	}
 
-	// 2. 注册路由
-	http.HandleFunc("/", handleIndex)           // 生成页
-	http.HandleFunc("/history", handleHistory)  // 新增：历史记录页
-	http.HandleFunc("/api/generate", handleAPI) // API 接口
+	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/history", handleHistory)
+	http.HandleFunc("/api/generate", handleAPI)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
 
-	// 3. 启动
-	port := getEnv("PORT", "80") // 默认为 80，适配 Deployra
+	port := getEnv("PORT", "80")
 	log.Printf("🚀 服务已启动，监听端口 :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
@@ -88,6 +83,7 @@ func main() {
 
 // 1. 生成页面
 func handleIndex(w http.ResponseWriter, r *http.Request) {
+	// 这里的 CSS 不需要改，因为没有用 fmt.Sprintf，直接输出字节流是安全的
 	htmlContent := `
 <!DOCTYPE html>
 <html>
@@ -96,73 +92,71 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>激活码生成器</title>
     <style>
-        body { font-family: -apple-system, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; background: #f5f5f7; color: #333; }
+        body { font-family: -apple-system, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; background: #f5f5f7; color: #333; }
         .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        h2 { margin-top: 0; color: #0071e3; }
-        .form-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; font-weight: 600; font-size: 14px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
+        h2 { margin: 0; color: #0071e3; font-size: 22px; }
+        .history-btn { font-size: 14px; color: #0071e3; text-decoration: none; font-weight: 600; padding: 6px 12px; background: #eef6ff; border-radius: 6px; transition: all 0.2s; }
+        .history-btn:hover { background: #dcebff; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 14px; }
         input { width: 100%; padding: 12px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
-        button { width: 100%; padding: 14px; background: #0071e3; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+        button { width: 100%; padding: 14px; background: #0071e3; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
         button:hover { background: #0077ed; }
-        .links { margin-top: 20px; text-align: right; font-size: 14px; }
-        a { color: #0071e3; text-decoration: none; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
         #result { margin-top: 25px; padding: 15px; background: #1d1d1f; color: #fff; border-radius: 8px; font-family: monospace; word-break: break-all; display: none; line-height: 1.5; }
+        .error { background: #ffe5e5 !important; color: #d70015 !important; border: 1px solid #ff3b30; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>🔐 激活码生成</h2>
-
-        <div class="form-group">
-            <label>鉴权密码</label>
-            <input type="password" id="token" placeholder="输入 Token">
+        <div class="header">
+            <h2>🔐 激活码生成</h2>
+            <a href="#" onclick="goToHistory(); return false;" class="history-btn">📄 历史记录</a>
         </div>
 
         <div class="form-group">
-            <label>客户机器码</label>
-            <input type="text" id="mid" placeholder="输入机器码">
+            <label>鉴权密码 (Token)</label>
+            <input type="password" id="token" placeholder="输入部署时设置的密码">
         </div>
-
+        <div class="form-group">
+            <label>客户机器码 (Machine ID)</label>
+            <input type="text" id="mid" placeholder="粘贴客户机器码">
+        </div>
         <div class="form-group">
             <label>到期日期</label>
             <input type="date" id="date">
         </div>
-
         <button onclick="generate()" id="btn">生成激活码</button>
         <div id="result"></div>
-
-        <div class="links">
-            <a href="#" onclick="goToHistory(); return false;">📄 查看生成记录</a>
-        </div>
     </div>
-
     <script>
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);
         document.getElementById('date').valueAsDate = tomorrow;
-
-        // 自动填充上次的Token
         const savedToken = localStorage.getItem('license_token');
         if(savedToken) document.getElementById('token').value = savedToken;
 
         function goToHistory() {
             const t = document.getElementById('token').value;
-            if(!t) { alert('请输入鉴权密码查看历史'); return; }
-            window.location.href = '/history?token=' + t;
+            const finalToken = t || localStorage.getItem('license_token');
+            if(!finalToken) {
+                alert('请先在输入框填入【鉴权密码】！');
+                document.getElementById('token').focus();
+                return;
+            }
+            window.location.href = '/history?token=' + finalToken;
         }
 
         async function generate() {
             const resDiv = document.getElementById('result');
             const btn = document.getElementById('btn');
             const token = document.getElementById('token').value;
-
-            // 保存 Token 方便下次使用
             localStorage.setItem('license_token', token);
-
             resDiv.style.display = 'block';
             resDiv.innerText = "生成中...";
+            resDiv.className = '';
             btn.disabled = true;
-
             try {
                 const response = await fetch('/api/generate', {
                     method: 'POST',
@@ -178,9 +172,11 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
                     resDiv.innerText = text;
                 } else {
                     resDiv.innerText = "❌ 错误: " + text;
+                    resDiv.className = 'error';
                 }
             } catch (err) {
-                resDiv.innerText = "❌ 请求失败: " + err;
+                resDiv.innerText = "❌ 网络请求失败: " + err;
+                resDiv.className = 'error';
             } finally {
                 btn.disabled = false;
             }
@@ -193,12 +189,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(htmlContent))
 }
 
-// 2. 新增：历史记录页面
+// 2. 历史记录页面 (修复了 % 符号导致的格式化错误)
 func handleHistory(w http.ResponseWriter, r *http.Request) {
-	// 简单鉴权：通过 URL 参数 token
 	token := r.URL.Query().Get("token")
 	if token != SecurityToken {
-		http.Error(w, "🚫 无权访问：Token 错误", 403)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(403)
+		w.Write([]byte(`<h1>🚫 访问拒绝</h1><p>Token 错误。<a href="/">返回首页</a></p>`))
 		return
 	}
 
@@ -206,7 +203,6 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 	records := historyList
 	mutex.Unlock()
 
-	// 倒序排列（最新的在前面）
 	rows := ""
 	for i := len(records) - 1; i >= 0; i-- {
 		rec := records[i]
@@ -218,6 +214,7 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
             </tr>`, rec.GenerateTime, rec.MachineID, rec.ExpiryDate)
 	}
 
+	// ⚠️ 重点修复：这里的 width: 100%%; 使用了双 %，防止 fmt.Sprintf 报错
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
@@ -228,24 +225,30 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
     <style>
         body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background: #f5f5f7; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h2 { margin-top: 0; color: #333; border-bottom: 1px solid #eee; padding-bottom: 15px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+        .header { display: flex; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 10px; }
+        h2 { margin: 0; color: #333; flex-grow: 1; text-align: center; }
+        .back-btn { color: #0071e3; text-decoration: none; font-weight: bold; }
+        /* 这里的 100%% 是关键 */
+        table { width: 100%%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
         th { text-align: left; color: #888; font-weight: 500; padding: 10px; border-bottom: 1px solid #eee; }
         td { padding: 12px 10px; border-bottom: 1px solid #f5f5f5; color: #333; }
-        .mid { font-family: monospace; color: #0070f3; }
-        a { display: inline-block; margin-bottom: 15px; color: #0071e3; text-decoration: none; }
+        .mid { font-family: monospace; color: #0070f3; word-break: break-all; }
+        tr:hover { background-color: #f9f9fa; }
     </style>
 </head>
 <body>
     <div class="card">
-        <a href="/">← 返回生成页</a>
-        <h2>📄 激活码生成记录 (%d 条)</h2>
+        <div class="header">
+            <a href="/" class="back-btn">← 返回</a>
+            <h2>📄 激活码生成记录 (%d 条)</h2>
+            <div style="width: 50px;"></div>
+        </div>
         <table>
             <thead>
                 <tr>
-                    <th>生成时间</th>
+                    <th style="width: 180px;">生成时间 (北京)</th>
                     <th>机器码</th>
-                    <th>到期时间</th>
+                    <th style="width: 120px;">到期时间</th>
                 </tr>
             </thead>
             <tbody>
@@ -267,15 +270,13 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", 405)
 		return
 	}
-
 	var req GenerateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "JSON 错误", 400)
 		return
 	}
-
 	if req.Token != SecurityToken {
-		http.Error(w, "Token 错误", 403)
+		http.Error(w, "鉴权失败", 403)
 		return
 	}
 
@@ -286,26 +287,21 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// === 记录日志 ===
 	saveRecord(req.MachineID, req.Expiry)
-	// ===============
-
 	w.Write([]byte(code))
 }
 
-// ================= 核心业务逻辑 =================
+// ================= 核心逻辑 =================
 
 func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	if machineID == "" || expiryStr == "" {
-		return "", fmt.Errorf("缺少字段")
+		return "", fmt.Errorf("字段为空")
 	}
-
 	privKeyContent := os.Getenv("PRIVATE_KEY")
 	if privKeyContent == "" {
 		return "", fmt.Errorf("私钥未配置")
 	}
 
-	// 优先使用 Asia/Shanghai，失败则 UTC
 	var t time.Time
 	var err error
 	loc, err := time.LoadLocation("Asia/Shanghai")
@@ -315,62 +311,49 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 		t, err = time.Parse("2006-01-02", expiryStr)
 	}
 	if err != nil {
-		return "", fmt.Errorf("日期错误: %v", err)
+		return "", err
 	}
-
 	expiryUTC := t.Add(24*time.Hour - time.Second).UTC().Unix()
 
 	dataBytes, _ := json.Marshal(LicenseData{MachineID: machineID, ExpiryUTC: expiryUTC})
 	block, _ := pem.Decode([]byte(privKeyContent))
 	if block == nil {
-		return "", fmt.Errorf("私钥格式错误")
+		return "", fmt.Errorf("私钥错误")
 	}
 	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err != nil {
 		return "", err
 	}
-
 	hash := sha256.Sum256(dataBytes)
 	sig, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hash[:])
 	if err != nil {
 		return "", err
 	}
-
 	licenseBytes, _ := json.Marshal(License{
 		Data:      base64.StdEncoding.EncodeToString(dataBytes),
 		Signature: base64.StdEncoding.EncodeToString(sig),
 	})
-
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	gz.Write(licenseBytes)
 	gz.Close()
-
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
-// ================= 存储辅助函数 =================
+// ================= 存储 =================
 
 func saveRecord(mid, expiry string) {
 	mutex.Lock()
 	defer mutex.Unlock()
-
-	// 格式化当前时间 (北京时间)
 	now := time.Now()
 	if loc, err := time.LoadLocation("Asia/Shanghai"); err == nil {
 		now = now.In(loc)
 	}
-	timeStr := now.Format("2006-01-02 15:04:05")
-
-	// 添加到切片
-	record := HistoryRecord{
-		GenerateTime: timeStr,
+	historyList = append(historyList, HistoryRecord{
+		GenerateTime: now.Format("2006-01-02 15:04:05"),
 		MachineID:    mid,
 		ExpiryDate:   expiry,
-	}
-	historyList = append(historyList, record)
-
-	// 保存到文件 (虽然云端重启会丢，但运行时不丢)
+	})
 	file, _ := os.Create(historyFile)
 	json.NewEncoder(file).Encode(historyList)
 	file.Close()
@@ -379,15 +362,11 @@ func saveRecord(mid, expiry string) {
 func loadHistory() {
 	mutex.Lock()
 	defer mutex.Unlock()
-
 	file, err := os.Open(historyFile)
-	if err != nil {
-		return // 文件不存在，忽略
+	if err == nil {
+		json.NewDecoder(file).Decode(&historyList)
+		file.Close()
 	}
-	defer file.Close()
-
-	json.NewDecoder(file).Decode(&historyList)
-	log.Printf("已加载 %d 条历史记录", len(historyList))
 }
 
 func getEnv(key, fallback string) string {
