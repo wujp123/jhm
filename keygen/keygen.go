@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"log"
 	"os"
 	"time"
 )
@@ -28,6 +29,7 @@ type License struct {
 	Signature string `json:"signature"`
 }
 
+// GenerateKeyPair 仅用于本地生成，云端不应调用此方法
 func GenerateKeyPair() error {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -42,6 +44,17 @@ func GenerateKeyPair() error {
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
+}
+
+// 获取私钥字节：优先从环境变量获取，其次从文件获取
+func getPrivateKeyBytes() ([]byte, error) {
+	// 1. 尝试从环境变量读取 (内容需为 PEM 格式字符串)
+	if envKey := os.Getenv("PRIVATE_KEY_CONTENT"); envKey != "" {
+		return []byte(envKey), nil
+	}
+
+	// 2. 尝试从文件读取
+	return os.ReadFile(privateKeyPath)
 }
 
 func GenerateLicense(machineID, expiry string) (string, error) {
@@ -59,14 +72,16 @@ func GenerateLicense(machineID, expiry string) (string, error) {
 		ExpiryUTC: t.Add(24*time.Hour - time.Second).UTC().Unix(),
 	})
 
-	privPem, err := os.ReadFile(privateKeyPath)
+	// 修改这里：使用封装好的函数获取私钥
+	privPem, err := getPrivateKeyBytes()
 	if err != nil {
-		return "", err
+		log.Println("无法读取私钥:", err)
+		return "", errors.New("server key missing")
 	}
 
 	block, _ := pem.Decode(privPem)
 	if block == nil {
-		return "", errors.New("bad private key")
+		return "", errors.New("bad private key format")
 	}
 
 	priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)

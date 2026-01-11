@@ -13,12 +13,15 @@ const ApiToken = "CHANGE_ME_SECRET"
 
 func main() {
 	// ✅ 启动时确保私钥存在（不阻塞、不读 stdin）
-	if _, err := os.Stat("private.pem"); os.IsNotExist(err) {
-		log.Println("⚠️ 未检测到私钥，自动生成...")
-		if err := keygen.GenerateKeyPair(); err != nil {
-			log.Fatal(err)
-		}
-	}
+	if os.Getenv("PRIVATE_KEY_CONTENT") == "" {
+            if _, err := os.Stat("private.pem"); os.IsNotExist(err) {
+                log.Println("⚠️ 未检测到私钥环境变量或文件，尝试生成本地文件...")
+                // 这一步在云端可能会因为权限不足报错，但比静默失败好
+                if err := keygen.GenerateKeyPair(); err != nil {
+                    log.Println("无法生成私钥文件(可能是只读文件系统)，请配置 PRIVATE_KEY_CONTENT 环境变量")
+                }
+            }
+        }
 
 	port := os.Getenv("PORT")
 	if port == "" {
