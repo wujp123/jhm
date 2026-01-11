@@ -82,7 +82,6 @@ func main() {
 
 // ================= HTTP 处理函数 =================
 
-// 1. 生成页面 (这里不使用 fmt.Sprintf，所以 % 不需要转义)
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	htmlContent := `
 <!DOCTYPE html>
@@ -144,7 +143,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             <input type="text" id="mid" placeholder="粘贴客户机器码">
         </div>
         <div class="form-group">
-            <label>到期日期</label>
+            <label>到期日期 (最长1个月)</label>
             <input type="date" id="date">
         </div>
         <button onclick="generate()" id="btn">生成激活码</button>
@@ -241,7 +240,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(htmlContent))
 }
 
-// 2. 历史记录页面 (修复版：所有 CSS 中的 % 都已转义为 %%)
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token != SecurityToken {
@@ -267,7 +265,6 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 			shortCode = "(无数据)"
 		}
 
-		// 这里的 row 数据插入是安全的，不涉及 %
 		rows += fmt.Sprintf(`
             <tr>
                 <td>%s</td>
@@ -286,7 +283,6 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
         )
 	}
 
-	// ⚠️ 修复：CSS 中的 % 改为 %%
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
@@ -301,7 +297,6 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
         h2 { margin: 0; color: #333; flex-grow: 1; text-align: center; }
         .back-btn { color: #0071e3; text-decoration: none; font-weight: bold; }
 
-        /* 修复：100%% */
         table { width: 100%%; border-collapse: collapse; margin-top: 10px; font-size: 14px; table-layout: fixed; }
         th { text-align: left; color: #888; font-weight: 500; padding: 10px; border-bottom: 1px solid #eee; white-space: nowrap; }
         td { padding: 12px 10px; border-bottom: 1px solid #f5f5f5; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -320,7 +315,6 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 
         tr:hover { background-color: #f9f9fa; }
 
-        /* 修复：-50%% */
         .toast { position: fixed; bottom: 20px; left: 50%%; transform: translateX(-50%%); background: rgba(0,0,0,0.8); color: white; padding: 10px 20px; border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
         .toast.show { opacity: 1; }
 
@@ -376,7 +370,6 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
-// 3. API 接口
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", 405)
@@ -425,6 +418,21 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// ==========================================
+	// 🔥 核心修改：增加 1 个月期限限制校验
+	// ==========================================
+	now := time.Now().In(loc)
+	// 计算最大允许日期：当前时间 + 1 个月
+	maxAllowed := now.AddDate(0, 1, 0)
+
+	// t 是用户选中日期的 00:00:00
+	// 如果选中的日期 (t) 晚于当前时间往后推一个月 (maxAllowed)，则报错
+	if t.After(maxAllowed) {
+		return "", fmt.Errorf("生成失败：有效期不能超过 1 个月\n当前最晚允许: %s", maxAllowed.Format("2006-01-02"))
+	}
+	// ==========================================
+
 	expiryUTC := t.Add(24*time.Hour - time.Second).UTC().Unix()
 
 	dataBytes, _ := json.Marshal(LicenseData{MachineID: machineID, ExpiryUTC: expiryUTC})
