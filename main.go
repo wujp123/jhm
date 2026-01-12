@@ -13,8 +13,11 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,6 +25,7 @@ import (
 // ================= 全局配置 =================
 
 var SecurityToken = getEnv("SECURITY_TOKEN", "123456")
+const PageSize = 20
 
 // ================= 数据结构 =================
 
@@ -41,6 +45,13 @@ type GenerateRequest struct {
 	Expiry    string `json:"expiry"`
 }
 
+// 删除请求 (历史记录用序号，机器码用字符串)
+type DeleteRequest struct {
+	Token     string `json:"token"`
+	No        int    `json:"no,omitempty"`         // 删除历史记录用
+	MachineID string `json:"machine_id,omitempty"` // 删除机器码用
+}
+
 type HistoryRecord struct {
 	GenerateTime string `json:"generate_time"`
 	MachineID    string `json:"machine_id"`
@@ -48,451 +59,367 @@ type HistoryRecord struct {
 	LicenseCode  string `json:"license_code"`
 }
 
+// 🔥 新增：机器码记录结构
+type MachineRecord struct {
+	MachineID string `json:"machine_id"`
+	LastSeen  string `json:"last_seen"` // 最后生成时间
+}
+
 // ================= 全局存储 =================
 
 var (
 	historyList []HistoryRecord
+	machineList []MachineRecord // 🔥 新增列表
 	historyFile = "history.json"
+	machineFile = "machines.json" // 🔥 新增文件
 	mutex       sync.Mutex
 )
 
 // ================= 主程序入口 =================
 
 func main() {
-	loadHistory()
-
-	if os.Getenv("PRIVATE_KEY") == "" {
-		log.Println("⚠️  警告: 环境变量 PRIVATE_KEY 未设置！")
-	}
+	loadData() // 加载历史和机器码
+	checkKeySource()
 
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/history", handleHistory)
+	http.HandleFunc("/machines", handleMachines) // 🔥 新增：机器码管理页
+	http.HandleFunc("/setup", handleSetup)
+
 	http.HandleFunc("/api/generate", handleAPI)
+	http.HandleFunc("/api/delete", handleDeleteHistory) // 删除历史
+	http.HandleFunc("/api/machines/delete", handleDeleteMachine) // 🔥 删除机器码
+
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
 
-	port := getEnv("PORT", "80")
+	port := getEnv("PORT", "8080")
 	log.Printf("🚀 服务已启动，监听端口 :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
 	}
 }
 
+func checkKeySource() {
+	if _, err := os.ReadFile("private.pem"); err == nil {
+		log.Println("✅ [模式] 本地文件: 检测到 'private.pem'，优先使用。")
+	} else if os.Getenv("PRIVATE_KEY") != "" {
+		log.Println("✅ [模式] 环境变量: 使用环境变量 PRIVATE_KEY。")
+	} else {
+		log.Println("⚠️ [警告] 未找到私钥！请在本地放入 private.pem 或设置环境变量。")
+	}
+}
+
+// ================= 核心逻辑：生成激活码 =================
+
+func generateLicenseCore(machineID, expiryStr string) (string, error) {
+	if machineID == "" || expiryStr == "" { return "", fmt.Errorf("机器码或日期为空") }
+
+	var rawKey []byte
+	var source string
+
+	if f, err := os.ReadFile("private.pem"); err == nil {
+		rawKey = f; source = "file"
+	} else {
+		envKey := os.Getenv("PRIVATE_KEY")
+		if envKey != "" { rawKey = []byte(envKey); source = "env" }
+	}
+
+	if len(rawKey) == 0 { return "", fmt.Errorf("❌ 未找到私钥。请上传 private.pem 或配置 PRIVATE_KEY") }
+
+	var block *pem.Block
+	block, _ = pem.Decode(rawKey)
+
+	if block == nil {
+		if source == "file" { return "", fmt.Errorf("本地 private.pem 文件格式错误") }
+		cleanKey := string(rawKey)
+		cleanKey = strings.ReplaceAll(cleanKey, "-----BEGIN RSA PRIVATE KEY-----", "")
+		cleanKey = strings.ReplaceAll(cleanKey, "-----END RSA PRIVATE KEY-----", "")
+		cleanKey = strings.ReplaceAll(cleanKey, "-----BEGIN PRIVATE KEY-----", "")
+		cleanKey = strings.ReplaceAll(cleanKey, "-----END PRIVATE KEY-----", "")
+		cleanKey = strings.ReplaceAll(cleanKey, " ", "")
+		cleanKey = strings.ReplaceAll(cleanKey, "\n", "")
+		cleanKey = strings.ReplaceAll(cleanKey, "\r", "")
+		var builder strings.Builder
+		builder.WriteString("-----BEGIN RSA PRIVATE KEY-----\n")
+		for i := 0; i < len(cleanKey); i += 64 {
+			end := i + 64; if end > len(cleanKey) { end = len(cleanKey) }
+			builder.WriteString(cleanKey[i:end]); builder.WriteString("\n")
+		}
+		builder.WriteString("-----END RSA PRIVATE KEY-----")
+		block, _ = pem.Decode([]byte(builder.String()))
+	}
+
+	if block == nil { return "", fmt.Errorf("私钥解析失败") }
+
+	var privKey *rsa.PrivateKey
+	var err error
+	privKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		if pkcs8, err2 := x509.ParsePKCS8PrivateKey(block.Bytes); err2 == nil {
+			if k, ok := pkcs8.(*rsa.PrivateKey); ok { privKey = k } else { return "", fmt.Errorf("不是 RSA 私钥") }
+		} else { return "", fmt.Errorf("私钥格式错误: %v", err) }
+	}
+
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil { loc = time.FixedZone("CST", 8*3600) }
+
+	t, err := time.ParseInLocation("2006-01-02", expiryStr, loc)
+	if err != nil { return "", fmt.Errorf("日期格式错误: %v", err) }
+
+	now := time.Now().In(loc)
+	maxAllowed := now.AddDate(0, 1, 0)
+	if t.After(maxAllowed) { return "", fmt.Errorf("❌ 有效期限制：不能超过1个月。\n当前最晚可签发至: %s", maxAllowed.Format("2006-01-02")) }
+
+	expiryUTC := t.Add(24*time.Hour - time.Second).UTC().Unix()
+
+	licenseData := LicenseData{MachineID: machineID, ExpiryUTC: expiryUTC}
+	dataJSON, _ := json.Marshal(licenseData)
+	hasher := sha256.New(); hasher.Write(dataJSON); hashed := hasher.Sum(nil)
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashed)
+	if err != nil { return "", fmt.Errorf("签名失败: %v", err) }
+
+	license := License{Data: base64.StdEncoding.EncodeToString(dataJSON), Signature: base64.StdEncoding.EncodeToString(signature)}
+	licenseJSON, _ := json.Marshal(license)
+	var compressedData bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressedData); gzipWriter.Write(licenseJSON); gzipWriter.Close()
+	return base64.StdEncoding.EncodeToString(compressedData.Bytes()), nil
+}
+
 // ================= HTTP 处理函数 =================
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	htmlContent := `
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>激活码生成器</title>
-    <style>
-        body { font-family: -apple-system, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; background: #f5f5f7; color: #333; }
-        .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
-        h2 { margin: 0; color: #0071e3; font-size: 22px; }
-        .history-btn { font-size: 14px; color: #0071e3; text-decoration: none; font-weight: 600; padding: 6px 12px; background: #eef6ff; border-radius: 6px; transition: all 0.2s; }
-        .history-btn:hover { background: #dcebff; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 14px; }
-        input { width: 100%; padding: 12px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
-        button { width: 100%; padding: 14px; background: #0071e3; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background 0.2s; margin-top: 10px; }
-        button:hover { background: #0077ed; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
+	if r.URL.Path != "/" { http.NotFound(w, r); return }
+	html := `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>License Keygen</title><style>body{font-family:-apple-system,sans-serif;max-width:600px;margin:20px auto;padding:20px;background:#f5f5f7}.card{background:white;padding:30px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1)}input{width:100%;padding:10px;margin:5px 0 15px;box-sizing:border-box;border:1px solid #ccc;border-radius:6px}button{width:100%;padding:12px;background:#0071e3;color:white;border:none;border-radius:6px;cursor:pointer}button:hover{background:#005bb5}#res{margin-top:20px;word-break:break-all;padding:10px;background:#eee;border-radius:6px;display:none;font-family:monospace}.link-box{margin-bottom:15px;text-align:right;font-size:12px}a{color:#666;text-decoration:none;margin-left:10px}a:hover{color:#0071e3}</style></head><body><div class="card"><h2>🔐 激活码生成器</h2>
+	<div class="link-box">
+		<a href="#" onclick="goPage('/machines');return false">💻 机器管理</a>
+		<a href="#" onclick="goPage('/history');return false">📜 生成记录</a>
+	</div>
+	<label>鉴权Token</label><input type="password" id="token" placeholder="默认为 123456">
+	<label>机器码</label><input type="text" id="mid" placeholder="客户机器码">
+	<label>到期日期 (限制1个月内)</label><input type="date" id="date">
+	<button onclick="gen()" id="btn">生成激活码</button><div id="res" onclick="copy(this)"></div></div><script>
+	document.getElementById('date').valueAsDate = new Date();
+	if(localStorage.getItem('lt')) document.getElementById('token').value = localStorage.getItem('lt');
+	function goPage(path){var t=document.getElementById('token').value;if(!t)return alert('请输入Token');location.href=path+'?token='+t}
+	async function gen(){
+		var t=document.getElementById('token').value, m=document.getElementById('mid').value, d=document.getElementById('date').value;
+		if(!t||!m||!d)return alert('请填写完整');
+		localStorage.setItem('lt',t);
+		var btn=document.getElementById('btn'), res=document.getElementById('res');
+		btn.disabled=true; btn.innerText="生成中...";
+		try{
+			var r = await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t,machine_id:m,expiry:d})});
+			var txt = await r.text();
+			res.style.display='block';
+			if(r.ok){res.style.color='green';res.innerText=txt;}else{res.style.color='red';res.innerText="错误: "+txt;}
+		}catch(e){alert(e)}
+		btn.disabled=false; btn.innerText="生成激活码";
+	}
+	function copy(e){navigator.clipboard.writeText(e.innerText).then(()=>alert('已复制'))}
+	</script></body></html>`
+	w.Write([]byte(html))
+}
 
-        #result-container { display: none; margin-top: 25px; }
-        .result-label { font-size: 12px; color: #888; margin-bottom: 5px; display: flex; justify-content: space-between; }
-        #result {
-            padding: 15px;
-            background: #1d1d1f;
-            color: #fff;
-            border-radius: 8px;
-            font-family: monospace;
-            word-break: break-all;
-            line-height: 1.5;
-            cursor: pointer;
-            position: relative;
-            transition: background 0.2s;
-        }
-        #result:hover { background: #333; }
-        #result:active { transform: scale(0.99); }
-        .copy-hint { font-size: 12px; color: #aaa; }
+func handleSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "POST" {
+		priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+		privBytes := x509.MarshalPKCS1PrivateKey(priv)
+		pubBytes, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+		privPem := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: privBytes})
+		pubPem := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes})
+		os.WriteFile("private.pem", privPem, 0600)
+		os.WriteFile("public.pem", pubPem, 0644)
+		json.NewEncoder(w).Encode(map[string]string{"private_key": string(privPem), "public_key": string(pubPem)})
+		return
+	}
+	html := `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:20px;max-width:800px;margin:0 auto"><h2>🛠️ 密钥工具</h2><button onclick="gen()" style="padding:10px 20px;background:red;color:white;border:none;border-radius:5px;cursor:pointer">生成新密钥</button><div id="box" style="display:none;margin-top:20px"><h3>私钥</h3><textarea id="priv" style="width:100%;height:150px" onclick="this.select()"></textarea><h3>公钥</h3><textarea id="pub" style="width:100%;height:150px" onclick="this.select()"></textarea></div><script>async function gen(){if(!confirm('确定生成吗？'))return;var res=await fetch('/setup',{method:'POST'});var d=await res.json();document.getElementById('box').style.display='block';document.getElementById('priv').value=d.private_key;document.getElementById('pub').value=d.public_key;}</script></body></html>`
+	w.Write([]byte(html))
+}
 
-        .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: white; padding: 10px 20px; border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
-        .toast.show { opacity: 1; }
-        .error { background: #ffe5e5 !important; color: #d70015 !important; border: 1px solid #ff3b30; cursor: default !important; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="header">
-            <h2>🔐 激活码生成</h2>
-            <a href="#" onclick="goToHistory(); return false;" class="history-btn">📄 历史记录</a>
-        </div>
+// 🔥 新增：机器码管理页面
+func handleMachines(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token != SecurityToken { http.Error(w, "Forbidden", 403); return }
 
-        <div class="form-group">
-            <label>鉴权密码 (Token)</label>
-            <input type="password" id="token" placeholder="输入部署时设置的密码">
-        </div>
-        <div class="form-group">
-            <label>客户机器码 (Machine ID)</label>
-            <input type="text" id="mid" placeholder="粘贴客户机器码">
-        </div>
-        <div class="form-group">
-            <label>到期日期 (最长1个月)</label>
-            <input type="date" id="date">
-        </div>
-        <button onclick="generate()" id="btn">生成激活码</button>
+	mutex.Lock()
+	// 倒序显示（最近活跃的在上面）
+	rowsHtml := ""
+	count := 0
+	for i := len(machineList) - 1; i >= 0; i-- {
+		count++
+		rec := machineList[i]
+		rowsHtml += fmt.Sprintf(`
+			<tr>
+				<td style="text-align:center;color:#888">%d</td>
+				<td style="font-family:monospace;color:#0071e3">%s</td>
+				<td>%s</td>
+				<td style="text-align:center">
+					<button onclick="delMachine('%s')" class="del-btn">删除</button>
+				</td>
+			</tr>`,
+			count, rec.MachineID, rec.LastSeen, rec.MachineID)
+	}
+	mutex.Unlock()
 
-        <div id="result-container">
-            <div class="result-label">
-                <span>生成结果：</span>
-                <span class="copy-hint">📋 点击下方黑色区域即可复制</span>
-            </div>
-            <div id="result" onclick="copyResult()"></div>
-        </div>
-    </div>
-
-    <div id="toast" class="toast">已复制到剪贴板 ✅</div>
-
-    <script>
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        document.getElementById('date').valueAsDate = tomorrow;
-        const savedToken = localStorage.getItem('license_token');
-        if(savedToken) document.getElementById('token').value = savedToken;
-
-        function goToHistory() {
-            const t = document.getElementById('token').value;
-            const finalToken = t || localStorage.getItem('license_token');
-            if(!finalToken) {
-                alert('请先在输入框填入【鉴权密码】！');
-                document.getElementById('token').focus();
-                return;
-            }
-            window.location.href = '/history?token=' + finalToken;
-        }
-
-        async function generate() {
-            const container = document.getElementById('result-container');
-            const resDiv = document.getElementById('result');
-            const btn = document.getElementById('btn');
-            const token = document.getElementById('token').value;
-            localStorage.setItem('license_token', token);
-            container.style.display = 'block';
-            resDiv.innerText = "生成中...";
-            resDiv.className = '';
-            btn.disabled = true;
-
-            try {
-                const response = await fetch('/api/generate', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        token: token,
-                        machine_id: document.getElementById('mid').value,
-                        expiry: document.getElementById('date').value
-                    })
-                });
-                const text = await response.text();
-                if (response.ok) {
-                    resDiv.innerText = text;
-                    resDiv.onclick = copyResult;
-                } else {
-                    resDiv.innerText = "❌ 错误: " + text;
-                    resDiv.className = 'error';
-                    resDiv.onclick = null;
-                }
-            } catch (err) {
-                resDiv.innerText = "❌ 网络请求失败: " + err;
-                resDiv.className = 'error';
-                resDiv.onclick = null;
-            } finally {
-                btn.disabled = false;
-            }
-        }
-
-        function copyResult() {
-            const text = document.getElementById('result').innerText;
-            if (!text || text.startsWith("生成中") || text.startsWith("❌")) return;
-            navigator.clipboard.writeText(text).then(() => {
-                showToast("已复制激活码 ✅");
-            }).catch(() => {
-                alert("复制失败，请手动复制");
-            });
-        }
-
-        function showToast(msg) {
-            const toast = document.getElementById('toast');
-            toast.innerText = msg;
-            toast.classList.add('show');
-            setTimeout(() => toast.classList.remove('show'), 2000);
-        }
-    </script>
-</body>
-</html>
-`
+	html := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>机器码管理</title>
+	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}
+	.del-btn{background:#fff;border:1px solid #ff3b30;color:#ff3b30;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px}
+	.del-btn:hover{background:#ff3b30;color:white}
+	</style></head><body>
+	<div class="card"><h2 style="display:flex;justify-content:space-between">💻 机器管理 (%d) <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2>
+		<table><thead><tr><th style="width:50px;text-align:center">#</th><th>机器码</th><th>最后生成时间</th><th style="width:60px;text-align:center">操作</th></tr></thead><tbody>%s</tbody></table>
+	</div>
+	<script>
+	async function delMachine(mid){
+		if(!confirm('确定要删除该机器码记录吗？'))return;
+		try {
+			let res = await fetch('/api/machines/delete', {
+				method: 'POST', headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({token: '%s', machine_id: mid})
+			});
+			if(res.ok) location.reload(); else alert(await res.text());
+		} catch(e){alert(e)}
+	}
+	</script></body></html>`, len(machineList), rowsHtml, token)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(htmlContent))
+	w.Write([]byte(html))
 }
 
 func handleHistory(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	if token != SecurityToken {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(403)
-		w.Write([]byte(`<h1>🚫 访问拒绝</h1><p>Token 错误。<a href="/">返回首页</a></p>`))
-		return
-	}
+	if token != SecurityToken { http.Error(w, "Forbidden", 403); return }
+
+	pageStr := r.URL.Query().Get("page")
+	page := 1
+	if p, err := strconv.Atoi(pageStr); err == nil && p > 0 { page = p }
 
 	mutex.Lock()
-	records := historyList
+	total := len(historyList)
+	startIndex := (page - 1) * PageSize
+	endIndex := startIndex + PageSize
+	if endIndex > total { endIndex = total }
+
+	var displayRows []HistoryRecord
+	for i := startIndex; i < endIndex; i++ {
+		realIndex := total - 1 - i
+		if realIndex >= 0 {
+			displayRows = append(displayRows, historyList[realIndex])
+		}
+	}
 	mutex.Unlock()
 
-	rows := ""
-	for i := len(records) - 1; i >= 0; i-- {
-		rec := records[i]
+	rowsHtml := ""
+	for i, rec := range displayRows {
+		rowNum := startIndex + i + 1
+		short := rec.LicenseCode
+		if len(short) > 10 { short = short[:10] + "..." }
 
-		shortCode := rec.LicenseCode
-		if len(shortCode) > 12 {
-			shortCode = shortCode[:12] + "..."
-		}
-		if shortCode == "" {
-			shortCode = "(无数据)"
-		}
-
-		rows += fmt.Sprintf(`
-            <tr>
-                <td>%s</td>
-                <td class="mid">%s</td>
-                <td>%s</td>
-                <td class="code-col">
-                    <span class="code-preview">%s</span>
-                    <button class="copy-btn" onclick="copyText('%s')">复制</button>
-                </td>
-            </tr>`,
-            rec.GenerateTime,
-            rec.MachineID,
-            rec.ExpiryDate,
-            shortCode,
-            rec.LicenseCode,
-        )
+		rowsHtml += fmt.Sprintf(`<tr><td style="text-align:center;color:#888;font-weight:bold">%d</td><td>%s</td><td style="font-family:monospace;color:#0071e3">%s</td><td>%s</td><td onclick="navigator.clipboard.writeText('%s').then(()=>alert('已复制'))" style="cursor:pointer;color:blue" title="点击复制">%s</td></tr>`,
+			rowNum, rec.GenerateTime, rec.MachineID, rec.ExpiryDate, rec.LicenseCode, short)
 	}
 
-	html := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>生成记录</title>
-    <style>
-        body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; background: #f5f5f7; }
-        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .header { display: flex; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 10px; }
-        h2 { margin: 0; color: #333; flex-grow: 1; text-align: center; }
-        .back-btn { color: #0071e3; text-decoration: none; font-weight: bold; }
+	totalPages := int(math.Ceil(float64(total) / float64(PageSize)))
+	navHtml := `<div style="margin-top:20px;text-align:center;">`
+	if page > 1 { navHtml += fmt.Sprintf(`<a href="/history?token=%s&page=%d" style="text-decoration:none;padding:5px 15px;background:#0071e3;color:white;border-radius:4px;font-size:14px">上一页</a> `, token, page-1) }
+	navHtml += fmt.Sprintf(`<span style="margin:0 10px">第 %d / %d 页 (共 %d 条)</span>`, page, totalPages, total)
+	if page < totalPages { navHtml += fmt.Sprintf(`<a href="/history?token=%s&page=%d" style="text-decoration:none;padding:5px 15px;background:#0071e3;color:white;border-radius:4px;font-size:14px">下一页</a>`, token, page+1) }
+	navHtml += `</div>`
 
-        table { width: 100%%; border-collapse: collapse; margin-top: 10px; font-size: 14px; table-layout: fixed; }
-        th { text-align: left; color: #888; font-weight: 500; padding: 10px; border-bottom: 1px solid #eee; white-space: nowrap; }
-        td { padding: 12px 10px; border-bottom: 1px solid #f5f5f5; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-        .mid { font-family: monospace; color: #0070f3; }
-        .code-col { display: flex; align-items: center; justify-content: space-between; }
-        .code-preview { font-family: monospace; color: #666; background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
-
-        .copy-btn {
-            background: white; border: 1px solid #d2d2d7; color: #333;
-            padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
-            margin-left: 8px; transition: all 0.2s;
-        }
-        .copy-btn:hover { background: #f5f5f7; border-color: #999; }
-        .copy-btn:active { background: #e5e5e5; }
-
-        tr:hover { background-color: #f9f9fa; }
-
-        .toast { position: fixed; bottom: 20px; left: 50%%; transform: translateX(-50%%); background: rgba(0,0,0,0.8); color: white; padding: 10px 20px; border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
-        .toast.show { opacity: 1; }
-
-        @media (max-width: 600px) {
-            th:nth-child(1), td:nth-child(1) { width: 80px; font-size: 12px; }
-            th:nth-child(2), td:nth-child(2) { display: none; }
-            th:nth-child(3), td:nth-child(3) { width: 90px; }
-        }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="header">
-            <a href="/" class="back-btn">← 返回</a>
-            <h2>📄 激活码生成记录 (%d 条)</h2>
-            <div style="width: 50px;"></div>
-        </div>
-        <table>
-            <thead>
-                <tr>
-                    <th style="width: 150px;">生成时间</th>
-                    <th>机器码</th>
-                    <th style="width: 100px;">到期时间</th>
-                    <th style="width: 160px;">激活码</th>
-                </tr>
-            </thead>
-            <tbody>
-                %s
-            </tbody>
-        </table>
-    </div>
-
-    <div id="toast" class="toast">已复制 ✅</div>
-
-    <script>
-        function copyText(text) {
-            if (!text) return;
-            navigator.clipboard.writeText(text).then(() => {
-                const toast = document.getElementById('toast');
-                toast.classList.add('show');
-                setTimeout(() => toast.classList.remove('show'), 2000);
-            }).catch(err => {
-                alert('复制失败');
-                console.error(err);
-            });
-        }
-    </script>
-</body>
-</html>
-`, len(records), rows)
-
+	html := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>历史记录</title>
+	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}</style></head><body>
+	<div class="card"><h2 style="display:flex;justify-content:space-between">📜 历史记录 <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2>
+		<table><thead><tr><th style="width:50px;text-align:center">序号</th><th>时间</th><th>机器码</th><th>到期</th><th>激活码</th></tr></thead><tbody>%s</tbody></table>%s</div></body></html>`, rowsHtml, navHtml)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }
 
 func handleAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", 405)
-		return
-	}
+	if r.Method != "POST" { http.Error(w, "405", 405); return }
 	var req GenerateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "JSON 错误", 400)
-		return
-	}
-	if req.Token != SecurityToken {
-		http.Error(w, "鉴权失败", 403)
-		return
-	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, err.Error(), 400); return }
+	if req.Token != SecurityToken { http.Error(w, "Token 错误", 403); return }
 
 	code, err := generateLicenseCore(req.MachineID, req.Expiry)
-	if err != nil {
-		log.Printf("生成失败: %v", err)
-		http.Error(w, err.Error(), 500)
-		return
-	}
+	if err != nil { log.Printf("生成失败: %v", err); http.Error(w, err.Error(), 500); return }
 
-	saveRecord(req.MachineID, req.Expiry, code)
+	saveData(req.MachineID, req.Expiry, code) // 🔥 同时保存历史和机器码
 	w.Write([]byte(code))
 }
 
-// ================= 核心逻辑 =================
-
-func generateLicenseCore(machineID, expiryStr string) (string, error) {
-	if machineID == "" || expiryStr == "" {
-		return "", fmt.Errorf("字段为空")
-	}
-	privKeyContent := os.Getenv("PRIVATE_KEY")
-	if privKeyContent == "" {
-		return "", fmt.Errorf("私钥未配置")
-	}
-
-	var t time.Time
-	var err error
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err == nil {
-		t, err = time.ParseInLocation("2006-01-02", expiryStr, loc)
-	} else {
-		t, err = time.Parse("2006-01-02", expiryStr)
-	}
-	if err != nil {
-		return "", err
-	}
-
-	// ==========================================
-	// 🔥 核心修改：增加 1 个月期限限制校验
-	// ==========================================
-	now := time.Now().In(loc)
-	// 计算最大允许日期：当前时间 + 1 个月
-	maxAllowed := now.AddDate(0, 1, 0)
-
-	// t 是用户选中日期的 00:00:00
-	// 如果选中的日期 (t) 晚于当前时间往后推一个月 (maxAllowed)，则报错
-	if t.After(maxAllowed) {
-		return "", fmt.Errorf("生成失败：有效期不能超过 1 个月\n当前最晚允许: %s", maxAllowed.Format("2006-01-02"))
-	}
-	// ==========================================
-
-	expiryUTC := t.Add(24*time.Hour - time.Second).UTC().Unix()
-
-	dataBytes, _ := json.Marshal(LicenseData{MachineID: machineID, ExpiryUTC: expiryUTC})
-	block, _ := pem.Decode([]byte(privKeyContent))
-	if block == nil {
-		return "", fmt.Errorf("私钥错误")
-	}
-	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		return "", err
-	}
-	hash := sha256.Sum256(dataBytes)
-	sig, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hash[:])
-	if err != nil {
-		return "", err
-	}
-	licenseBytes, _ := json.Marshal(License{
-		Data:      base64.StdEncoding.EncodeToString(dataBytes),
-		Signature: base64.StdEncoding.EncodeToString(sig),
-	})
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	gz.Write(licenseBytes)
-	gz.Close()
-	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+// 删除历史 API
+func handleDeleteHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" { http.Error(w, "Method Not Allowed", 405); return }
+	var req DeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, "JSON Error", 400); return }
+	if req.Token != SecurityToken { http.Error(w, "Token Error", 403); return }
+	mutex.Lock(); defer mutex.Unlock()
+	total := len(historyList)
+	if req.No <= 0 || req.No > total { http.Error(w, "序号不存在", 404); return }
+	historyList = append(historyList[:total-req.No], historyList[total-req.No+1:]...)
+	if f, err := os.Create(historyFile); err == nil { json.NewEncoder(f).Encode(historyList); f.Close() }
+	w.Write([]byte(fmt.Sprintf("✅ 成功删除序号: %d", req.No)))
 }
 
-// ================= 存储 =================
+// 🔥 新增：删除机器码 API
+func handleDeleteMachine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" { http.Error(w, "Method Not Allowed", 405); return }
+	var req DeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, "JSON Error", 400); return }
+	if req.Token != SecurityToken { http.Error(w, "Token Error", 403); return }
+	if req.MachineID == "" { http.Error(w, "MachineID Empty", 400); return }
 
-func saveRecord(mid, expiry, code string) {
-	mutex.Lock()
-	defer mutex.Unlock()
-	now := time.Now()
-	if loc, err := time.LoadLocation("Asia/Shanghai"); err == nil {
-		now = now.In(loc)
+	mutex.Lock(); defer mutex.Unlock()
+	newMachines := make([]MachineRecord, 0, len(machineList))
+	found := false
+	for _, m := range machineList {
+		if m.MachineID == req.MachineID {
+			found = true
+			continue
+		}
+		newMachines = append(newMachines, m)
 	}
-	historyList = append(historyList, HistoryRecord{
-		GenerateTime: now.Format("2006-01-02 15:04:05"),
-		MachineID:    mid,
-		ExpiryDate:   expiry,
-		LicenseCode:  code,
-	})
-	file, _ := os.Create(historyFile)
-	json.NewEncoder(file).Encode(historyList)
-	file.Close()
+
+	if !found { http.Error(w, "机器码未找到", 404); return }
+
+	machineList = newMachines
+	if f, err := os.Create(machineFile); err == nil { json.NewEncoder(f).Encode(machineList); f.Close() }
+	w.Write([]byte("✅ 机器码已删除"))
 }
 
-func loadHistory() {
-	mutex.Lock()
-	defer mutex.Unlock()
-	file, err := os.Open(historyFile)
-	if err == nil {
-		json.NewDecoder(file).Decode(&historyList)
-		file.Close()
+// 🔥 修改：统一保存逻辑 (保存历史 + 保存机器码)
+func saveData(mid, expiry, code string) {
+	mutex.Lock(); defer mutex.Unlock()
+	nowStr := time.Now().Format("2006-01-02 15:04:05")
+
+	// 1. 保存历史
+	rec := HistoryRecord{GenerateTime: nowStr, MachineID: mid, ExpiryDate: expiry, LicenseCode: code}
+	historyList = append(historyList, rec)
+	if f, err := os.Create(historyFile); err == nil { json.NewEncoder(f).Encode(historyList); f.Close() }
+
+	// 2. 保存机器码 (去重)
+	found := false
+	for i, m := range machineList {
+		if m.MachineID == mid {
+			machineList[i].LastSeen = nowStr // 更新时间
+			found = true
+			break
+		}
 	}
+	if !found {
+		machineList = append(machineList, MachineRecord{MachineID: mid, LastSeen: nowStr})
+	}
+	if f, err := os.Create(machineFile); err == nil { json.NewEncoder(f).Encode(machineList); f.Close() }
 }
 
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+func loadData() {
+	mutex.Lock(); defer mutex.Unlock()
+	// 加载历史
+	if f, err := os.Open(historyFile); err == nil { json.NewDecoder(f).Decode(&historyList); f.Close() }
+	// 加载机器码
+	if f, err := os.Open(machineFile); err == nil { json.NewDecoder(f).Decode(&machineList); f.Close() }
 }
+
+func getEnv(k, def string) string { if v := os.Getenv(k); v != "" { return v }; return def }
