@@ -22,104 +22,126 @@ import (
 	"time"
 )
 
-// ================= 全局配置 =================
+// ... (省略部分结构体定义，保持不变，下面是关键修改) ...
 
-var SecurityToken = getEnv("SECURITY_TOKEN", "123456")
-const PageSize = 20
-
-// ================= 数据结构 =================
-
+// ================= 数据结构 (保持不变) =================
 type LicenseData struct {
 	MachineID string `json:"machine_id"`
 	ExpiryUTC int64  `json:"expiry_utc"`
 }
-
 type License struct {
 	Data      string `json:"data"`
 	Signature string `json:"signature"`
 }
-
 type GenerateRequest struct {
 	Token     string `json:"token"`
 	MachineID string `json:"machine_id"`
 	Expiry    string `json:"expiry"`
 }
-
 type DeleteRequest struct {
 	Token     string `json:"token"`
 	No        int    `json:"no,omitempty"`
 	MachineID string `json:"machine_id,omitempty"`
 }
-
 type HistoryRecord struct {
 	GenerateTime string `json:"generate_time"`
 	MachineID    string `json:"machine_id"`
 	ExpiryDate   string `json:"expiry_date"`
 	LicenseCode  string `json:"license_code"`
 }
-
 type MachineRecord struct {
 	MachineID string `json:"machine_id"`
 	LastSeen  string `json:"last_seen"`
 }
 
-// ================= 全局存储 =================
-
 var (
+	SecurityToken = getEnv("SECURITY_TOKEN", "123456")
 	historyList []HistoryRecord
 	machineList []MachineRecord
 	historyFile = "history.json"
 	machineFile = "machines.json"
 	mutex       sync.Mutex
+	PageSize    = 20
 )
 
-// ================= 主程序入口 =================
+// ================= 主程序入口 (调试版) =================
 
 func main() {
-	loadData()
-	checkKeySource()
+	// 🔥 1. 强制打印启动日志到控制台
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.Println(">>> 正在启动应用...")
 
-	mux := http.NewServeMux()
+	// 🔥 2. 安全加载数据（防止因文件权限崩溃）
+	safeLoadData()
 
-	mux.HandleFunc("/", handleIndex)
-	mux.HandleFunc("/history", handleHistory)
-	mux.HandleFunc("/machines", handleMachines)
-	mux.HandleFunc("/setup", handleSetup)
+	// 🔥 3. 检查环境变量（调试用）
+	log.Printf(">>> 环境变量检测: PORT=[%s], SECURITY_TOKEN=[%s]", os.Getenv("PORT"), os.Getenv("SECURITY_TOKEN"))
+	if os.Getenv("PRIVATE_KEY") != "" {
+		log.Printf(">>> 环境变量检测: PRIVATE_KEY 长度为 %d (已设置)", len(os.Getenv("PRIVATE_KEY")))
+	} else {
+		log.Println(">>> ⚠️ 警告: PRIVATE_KEY 环境变量为空！")
+	}
 
-	mux.HandleFunc("/api/generate", handleAPI)
-	mux.HandleFunc("/api/delete", handleDeleteHistory)
-	mux.HandleFunc("/api/machines/delete", handleDeleteMachine)
+	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/history", handleHistory)
+	http.HandleFunc("/machines", handleMachines)
+	http.HandleFunc("/setup", handleSetup)
+	http.HandleFunc("/api/generate", handleAPI)
+	http.HandleFunc("/api/delete", handleDeleteHistory)
+	http.HandleFunc("/api/machines/delete", handleDeleteMachine)
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// 🔥 4. 健康检查接口 (必须存在)
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		log.Println(">>> 收到健康检查请求 /health")
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
 
-	// 🔥 同时监听两个端口
-	go func() {
-		log.Println("🚀 Listening on :8080 (container port)")
-		if err := http.ListenAndServe(":8080", mux); err != nil {
-			log.Fatal(err)
-		}
-	}()
+	// 🔥 5. 端口监听逻辑
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+		log.Println(">>> PORT 变量未设置，使用默认端口: 8080")
+	}
 
-	log.Println("🚀 Listening on :80 (health check)")
-	if err := http.ListenAndServe(":80", mux); err != nil {
-		log.Fatal(err)
+	log.Printf(">>> 🚀 服务准备监听: 0.0.0.0:%s", port)
+
+	// 强制监听所有网卡，防止 localhost 问题
+	err := http.ListenAndServe("0.0.0.0:"+port, nil)
+	if err != nil {
+		log.Fatalf(">>> ❌ 致命错误: 无法启动 Web 服务: %v", err)
 	}
 }
+
+// 安全加载数据，出错了只打印不崩溃
+func safeLoadData() {
+	mutex.Lock(); defer mutex.Unlock()
+	log.Println(">>> 正在加载数据文件...")
+
+	if f, err := os.Open(historyFile); err == nil {
+		json.NewDecoder(f).Decode(&historyList)
+		f.Close()
+	} else {
+		log.Printf(">>> 提示: 无法读取历史文件 (可能是第一次运行): %v", err)
+	}
+
+	if f, err := os.Open(machineFile); err == nil {
+		json.NewDecoder(f).Decode(&machineList)
+		f.Close()
+	} else {
+		log.Printf(">>> 提示: 无法读取机器码文件: %v", err)
+	}
+}
+
+// ... 下面是其他的处理函数，保持原样即可，为了篇幅我不重复粘贴所有业务逻辑 ...
+// 请保留你原来的 generateLicenseCore, handleIndex 等函数
+// 只要替换上面的 main 和 safeLoadData 即可。
+
+// 为了确保你能直接运行，这里补全核心 Handler，你可以直接复制替换整个 main.go
 
 func checkKeySource() {
-	if _, err := os.ReadFile("private.pem"); err == nil {
-		log.Println("✅ [模式] 本地文件: 检测到 'private.pem'，优先使用。")
-	} else if os.Getenv("PRIVATE_KEY") != "" {
-		log.Println("✅ [模式] 环境变量: 使用环境变量 PRIVATE_KEY。")
-	} else {
-		log.Println("⚠️ [警告] 未找到私钥！请在本地放入 private.pem 或设置环境变量。")
-	}
+	// 调试版不需要这个检查，日志里已经打印了
 }
-
-// ================= 核心逻辑 =================
 
 func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	if machineID == "" || expiryStr == "" { return "", fmt.Errorf("机器码或日期为空") }
@@ -142,13 +164,20 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	if block == nil {
 		if source == "file" { return "", fmt.Errorf("本地 private.pem 文件格式错误") }
 		cleanKey := string(rawKey)
-		cleanKey = strings.ReplaceAll(cleanKey, "-----BEGIN RSA PRIVATE KEY-----", "")
-		cleanKey = strings.ReplaceAll(cleanKey, "-----END RSA PRIVATE KEY-----", "")
-		cleanKey = strings.ReplaceAll(cleanKey, "-----BEGIN PRIVATE KEY-----", "")
-		cleanKey = strings.ReplaceAll(cleanKey, "-----END PRIVATE KEY-----", "")
-		cleanKey = strings.ReplaceAll(cleanKey, " ", "")
-		cleanKey = strings.ReplaceAll(cleanKey, "\n", "")
-		cleanKey = strings.ReplaceAll(cleanKey, "\r", "")
+		// 暴力清理
+		cleanKey = strings.Map(func(r rune) rune {
+			if r == '-' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+				return r
+			}
+			return -1
+		}, cleanKey)
+
+		// 移除 header/footer
+		cleanKey = strings.ReplaceAll(cleanKey, "BEGINRSAPRIVATEKEY", "")
+		cleanKey = strings.ReplaceAll(cleanKey, "ENDRSAPRIVATEKEY", "")
+		cleanKey = strings.ReplaceAll(cleanKey, "BEGINPRIVATEKEY", "")
+		cleanKey = strings.ReplaceAll(cleanKey, "ENDPRIVATEKEY", "")
+
 		var builder strings.Builder
 		builder.WriteString("-----BEGIN RSA PRIVATE KEY-----\n")
 		for i := 0; i < len(cleanKey); i += 64 {
@@ -159,7 +188,7 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 		block, _ = pem.Decode([]byte(builder.String()))
 	}
 
-	if block == nil { return "", fmt.Errorf("私钥解析失败") }
+	if block == nil { return "", fmt.Errorf("私钥解析失败，请检查环境变量格式") }
 
 	var privKey *rsa.PrivateKey
 	var err error
@@ -179,11 +208,10 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	now := time.Now().In(loc)
 	maxAllowed := now.AddDate(0, 1, 0)
 	if t.After(maxAllowed.Add(24 * time.Hour)) {
-		return "", fmt.Errorf("❌ 有效期限制：不能超过1个月。\n当前最晚可签发至: %s", maxAllowed.Format("2006-01-02"))
+		return "", fmt.Errorf("❌ 有效期限制：不能超过1个月")
 	}
 
 	expiryUTC := t.Add(24*time.Hour - time.Second).UTC().Unix()
-
 	licenseData := LicenseData{MachineID: machineID, ExpiryUTC: expiryUTC}
 	dataJSON, _ := json.Marshal(licenseData)
 	hasher := sha256.New(); hasher.Write(dataJSON); hashed := hasher.Sum(nil)
@@ -196,8 +224,6 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	gzipWriter := gzip.NewWriter(&compressedData); gzipWriter.Write(licenseJSON); gzipWriter.Close()
 	return base64.StdEncoding.EncodeToString(compressedData.Bytes()), nil
 }
-
-// ================= HTTP 处理函数 =================
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" { http.NotFound(w, r); return }
@@ -282,31 +308,15 @@ func handleMachines(w http.ResponseWriter, r *http.Request) {
 	for i := len(machineList) - 1; i >= 0; i-- {
 		count++
 		rec := machineList[i]
-		rowsHtml += fmt.Sprintf(`
-			<tr>
-				<td style="text-align:center;color:#888">%d</td>
-				<td style="font-family:monospace;color:#0071e3">%s</td>
-				<td>%s</td>
-				<td style="text-align:center">
-					<button onclick="copyText('%s')" class="copy-btn">复制</button>
-					<button onclick="delMachine('%s')" class="del-btn">删除</button>
-				</td>
-			</tr>`,
-			count, rec.MachineID, rec.LastSeen, rec.MachineID, rec.MachineID)
+		rowsHtml += fmt.Sprintf(`<tr><td style="text-align:center;color:#888">%d</td><td style="font-family:monospace;color:#0071e3">%s</td><td>%s</td><td style="text-align:center"><button onclick="copyText('%s')" class="copy-btn">复制</button><button onclick="delMachine('%s')" class="del-btn">删除</button></td></tr>`, count, rec.MachineID, rec.LastSeen, rec.MachineID, rec.MachineID)
 	}
 	mutex.Unlock()
 
 	html := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>机器码管理</title>
-	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}
-	.del-btn{background:#fff;border:1px solid #ff3b30;color:#ff3b30;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px} .del-btn:hover{background:#ff3b30;color:white}
-	/* 🔥 新增复制按钮样式 */
-	.copy-btn{background:#fff;border:1px solid #0071e3;color:#0071e3;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px;margin-right:6px} .copy-btn:hover{background:#0071e3;color:white}
-	</style></head><body>
+	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}.del-btn{background:#fff;border:1px solid #ff3b30;color:#ff3b30;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px} .del-btn:hover{background:#ff3b30;color:white}.copy-btn{background:#fff;border:1px solid #0071e3;color:#0071e3;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px;margin-right:6px} .copy-btn:hover{background:#0071e3;color:white}</style></head><body>
 	<div class="card"><h2 style="display:flex;justify-content:space-between">💻 机器管理 (%d) <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2><table><thead><tr><th style="width:50px;text-align:center">#</th><th>机器码</th><th>最后生成时间</th><th style="width:110px;text-align:center">操作</th></tr></thead><tbody>%s</tbody></table></div>
-	<script>
-	function copyText(t){navigator.clipboard.writeText(t).then(()=>alert("已复制"))}
-	async function delMachine(mid){if(!confirm('确定要删除该机器码记录吗？'))return;try {let res = await fetch('/api/machines/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},body: JSON.stringify({token: '%s', machine_id: mid})});if(res.ok) location.reload(); else alert(await res.text());} catch(e){alert(e)}}
-	</script></body></html>`, len(machineList), rowsHtml, token)
+	<script>function copyText(t){navigator.clipboard.writeText(t).then(()=>alert("已复制"))}
+	async function delMachine(mid){if(!confirm('确定要删除该机器码记录吗？'))return;try {let res = await fetch('/api/machines/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},body: JSON.stringify({token: '%s', machine_id: mid})});if(res.ok) location.reload(); else alert(await res.text());} catch(e){alert(e)}}</script></body></html>`, len(machineList), rowsHtml, token)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }
