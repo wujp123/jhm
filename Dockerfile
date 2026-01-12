@@ -17,6 +17,6 @@ ENV TZ=Asia/Shanghai
 COPY --from=builder /app/server .
 
 # --- 修改这里：改为暴露 80 ---
-EXPOSE 8080
+EXPOSE 80
 
 CMD ["./server"]

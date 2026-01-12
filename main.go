@@ -93,7 +93,7 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	port := getEnv("PORT", "8080")
+	port := getEnv("PORT", "80")
 	log.Printf("🚀 服务已启动，监听端口 :%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
