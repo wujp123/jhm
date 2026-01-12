@@ -24,7 +24,7 @@ import (
 
 // ================= 全局配置 =================
 
-var SecurityToken = getEnv("SECURITY_TOKEN", "123456")
+var SecurityToken = getEnv("SECURITY_TOKEN", "88888888")
 const PageSize = 20
 
 // ================= 数据结构 =================
@@ -45,11 +45,10 @@ type GenerateRequest struct {
 	Expiry    string `json:"expiry"`
 }
 
-// 删除请求 (历史记录用序号，机器码用字符串)
 type DeleteRequest struct {
 	Token     string `json:"token"`
-	No        int    `json:"no,omitempty"`         // 删除历史记录用
-	MachineID string `json:"machine_id,omitempty"` // 删除机器码用
+	No        int    `json:"no,omitempty"`
+	MachineID string `json:"machine_id,omitempty"`
 }
 
 type HistoryRecord struct {
@@ -59,36 +58,35 @@ type HistoryRecord struct {
 	LicenseCode  string `json:"license_code"`
 }
 
-// 🔥 新增：机器码记录结构
 type MachineRecord struct {
 	MachineID string `json:"machine_id"`
-	LastSeen  string `json:"last_seen"` // 最后生成时间
+	LastSeen  string `json:"last_seen"`
 }
 
 // ================= 全局存储 =================
 
 var (
 	historyList []HistoryRecord
-	machineList []MachineRecord // 🔥 新增列表
+	machineList []MachineRecord
 	historyFile = "history.json"
-	machineFile = "machines.json" // 🔥 新增文件
+	machineFile = "machines.json"
 	mutex       sync.Mutex
 )
 
 // ================= 主程序入口 =================
 
 func main() {
-	loadData() // 加载历史和机器码
+	loadData()
 	checkKeySource()
 
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/history", handleHistory)
-	http.HandleFunc("/machines", handleMachines) // 🔥 新增：机器码管理页
+	http.HandleFunc("/machines", handleMachines)
 	http.HandleFunc("/setup", handleSetup)
 
 	http.HandleFunc("/api/generate", handleAPI)
-	http.HandleFunc("/api/delete", handleDeleteHistory) // 删除历史
-	http.HandleFunc("/api/machines/delete", handleDeleteMachine) // 🔥 删除机器码
+	http.HandleFunc("/api/delete", handleDeleteHistory)
+	http.HandleFunc("/api/machines/delete", handleDeleteMachine)
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -112,7 +110,7 @@ func checkKeySource() {
 	}
 }
 
-// ================= 核心逻辑：生成激活码 =================
+// ================= 核心逻辑 =================
 
 func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	if machineID == "" || expiryStr == "" { return "", fmt.Errorf("机器码或日期为空") }
@@ -171,7 +169,10 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 
 	now := time.Now().In(loc)
 	maxAllowed := now.AddDate(0, 1, 0)
-	if t.After(maxAllowed) { return "", fmt.Errorf("❌ 有效期限制：不能超过1个月。\n当前最晚可签发至: %s", maxAllowed.Format("2006-01-02")) }
+	// 允许误差 24 小时，防止跨天导致的边界问题
+	if t.After(maxAllowed.Add(24 * time.Hour)) {
+		return "", fmt.Errorf("❌ 有效期限制：不能超过1个月。\n当前最晚可签发至: %s", maxAllowed.Format("2006-01-02"))
+	}
 
 	expiryUTC := t.Add(24*time.Hour - time.Second).UTC().Unix()
 
@@ -192,16 +193,59 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" { http.NotFound(w, r); return }
-	html := `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>License Keygen</title><style>body{font-family:-apple-system,sans-serif;max-width:600px;margin:20px auto;padding:20px;background:#f5f5f7}.card{background:white;padding:30px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1)}input{width:100%;padding:10px;margin:5px 0 15px;box-sizing:border-box;border:1px solid #ccc;border-radius:6px}button{width:100%;padding:12px;background:#0071e3;color:white;border:none;border-radius:6px;cursor:pointer}button:hover{background:#005bb5}#res{margin-top:20px;word-break:break-all;padding:10px;background:#eee;border-radius:6px;display:none;font-family:monospace}.link-box{margin-bottom:15px;text-align:right;font-size:12px}a{color:#666;text-decoration:none;margin-left:10px}a:hover{color:#0071e3}</style></head><body><div class="card"><h2>🔐 激活码生成器</h2>
+	html := `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>License Keygen</title>
+	<style>
+		body{font-family:-apple-system,sans-serif;max-width:600px;margin:20px auto;padding:20px;background:#f5f5f7}
+		.card{background:white;padding:30px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1)}
+		input{width:100%;padding:10px;margin:5px 0 15px;box-sizing:border-box;border:1px solid #ccc;border-radius:6px}
+		button{width:100%;padding:12px;background:#0071e3;color:white;border:none;border-radius:6px;cursor:pointer}
+		button:hover{background:#005bb5}
+		#res{margin-top:20px;word-break:break-all;padding:10px;background:#eee;border-radius:6px;display:none;font-family:monospace}
+		.link-box{margin-bottom:15px;text-align:right;font-size:12px}
+		a{color:#666;text-decoration:none;margin-left:10px} a:hover{color:#0071e3}
+
+		/* 🔥 新增快捷标签样式 */
+		.tags { display: flex; gap: 8px; margin-bottom: 5px; }
+		.tag { padding: 4px 10px; border-radius: 15px; background: #eef6ff; color: #0071e3; font-size: 12px; cursor: pointer; border: 1px solid #dcebfa; user-select: none; transition: all 0.2s; }
+		.tag:hover { background: #0071e3; color: white; }
+	</style>
+	</head><body><div class="card"><h2>🔐 激活码生成器</h2>
 	<div class="link-box">
 		<a href="#" onclick="goPage('/machines');return false">💻 机器管理</a>
 		<a href="#" onclick="goPage('/history');return false">📜 生成记录</a>
 	</div>
-	<label>鉴权Token</label><input type="password" id="token" placeholder="默认为 123456">
+
+	<label>鉴权Token</label><input type="password" id="token" placeholder="输入密码">
 	<label>机器码</label><input type="text" id="mid" placeholder="客户机器码">
-	<label>到期日期 (限制1个月内)</label><input type="date" id="date">
-	<button onclick="gen()" id="btn">生成激活码</button><div id="res" onclick="copy(this)"></div></div><script>
+
+	<!-- 🔥 快捷日期选择区 -->
+	<label>到期日期</label>
+	<div class="tags">
+		<div class="tag" onclick="addDate(1)">+1天</div>
+		<div class="tag" onclick="addDate(3)">+3天</div>
+		<div class="tag" onclick="addDate(7)">+1周</div>
+		<div class="tag" onclick="addMonth(1)">+1月</div>
+	</div>
+	<input type="date" id="date">
+
+	<button onclick="gen()" id="btn">生成激活码</button><div id="res" onclick="copy(this)"></div></div>
+
+	<script>
+	// 默认设置为当天
 	document.getElementById('date').valueAsDate = new Date();
+
+	// 🔥 日期计算函数
+	function addDate(days) {
+		const d = new Date();
+		d.setDate(d.getDate() + days);
+		document.getElementById('date').valueAsDate = d;
+	}
+	function addMonth(months) {
+		const d = new Date();
+		d.setMonth(d.getMonth() + months);
+		document.getElementById('date').valueAsDate = d;
+	}
+
 	if(localStorage.getItem('lt')) document.getElementById('token').value = localStorage.getItem('lt');
 	function goPage(path){var t=document.getElementById('token').value;if(!t)return alert('请输入Token');location.href=path+'?token='+t}
 	async function gen(){
@@ -239,51 +283,24 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
-// 🔥 新增：机器码管理页面
 func handleMachines(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token != SecurityToken { http.Error(w, "Forbidden", 403); return }
 
 	mutex.Lock()
-	// 倒序显示（最近活跃的在上面）
 	rowsHtml := ""
 	count := 0
 	for i := len(machineList) - 1; i >= 0; i-- {
 		count++
 		rec := machineList[i]
-		rowsHtml += fmt.Sprintf(`
-			<tr>
-				<td style="text-align:center;color:#888">%d</td>
-				<td style="font-family:monospace;color:#0071e3">%s</td>
-				<td>%s</td>
-				<td style="text-align:center">
-					<button onclick="delMachine('%s')" class="del-btn">删除</button>
-				</td>
-			</tr>`,
-			count, rec.MachineID, rec.LastSeen, rec.MachineID)
+		rowsHtml += fmt.Sprintf(`<tr><td style="text-align:center;color:#888">%d</td><td style="font-family:monospace;color:#0071e3">%s</td><td>%s</td><td style="text-align:center"><button onclick="delMachine('%s')" class="del-btn">删除</button></td></tr>`, count, rec.MachineID, rec.LastSeen, rec.MachineID)
 	}
 	mutex.Unlock()
 
 	html := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>机器码管理</title>
-	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}
-	.del-btn{background:#fff;border:1px solid #ff3b30;color:#ff3b30;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px}
-	.del-btn:hover{background:#ff3b30;color:white}
-	</style></head><body>
-	<div class="card"><h2 style="display:flex;justify-content:space-between">💻 机器管理 (%d) <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2>
-		<table><thead><tr><th style="width:50px;text-align:center">#</th><th>机器码</th><th>最后生成时间</th><th style="width:60px;text-align:center">操作</th></tr></thead><tbody>%s</tbody></table>
-	</div>
-	<script>
-	async function delMachine(mid){
-		if(!confirm('确定要删除该机器码记录吗？'))return;
-		try {
-			let res = await fetch('/api/machines/delete', {
-				method: 'POST', headers: {'Content-Type': 'application/json'},
-				body: JSON.stringify({token: '%s', machine_id: mid})
-			});
-			if(res.ok) location.reload(); else alert(await res.text());
-		} catch(e){alert(e)}
-	}
-	</script></body></html>`, len(machineList), rowsHtml, token)
+	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}.del-btn{background:#fff;border:1px solid #ff3b30;color:#ff3b30;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px}.del-btn:hover{background:#ff3b30;color:white}</style></head><body>
+	<div class="card"><h2 style="display:flex;justify-content:space-between">💻 机器管理 (%d) <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2><table><thead><tr><th style="width:50px;text-align:center">#</th><th>机器码</th><th>最后生成时间</th><th style="width:60px;text-align:center">操作</th></tr></thead><tbody>%s</tbody></table></div>
+	<script>async function delMachine(mid){if(!confirm('确定要删除该机器码记录吗？'))return;try {let res = await fetch('/api/machines/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},body: JSON.stringify({token: '%s', machine_id: mid})});if(res.ok) location.reload(); else alert(await res.text());} catch(e){alert(e)}}</script></body></html>`, len(machineList), rowsHtml, token)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }
@@ -305,9 +322,7 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 	var displayRows []HistoryRecord
 	for i := startIndex; i < endIndex; i++ {
 		realIndex := total - 1 - i
-		if realIndex >= 0 {
-			displayRows = append(displayRows, historyList[realIndex])
-		}
+		if realIndex >= 0 { displayRows = append(displayRows, historyList[realIndex]) }
 	}
 	mutex.Unlock()
 
@@ -316,9 +331,7 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 		rowNum := startIndex + i + 1
 		short := rec.LicenseCode
 		if len(short) > 10 { short = short[:10] + "..." }
-
-		rowsHtml += fmt.Sprintf(`<tr><td style="text-align:center;color:#888;font-weight:bold">%d</td><td>%s</td><td style="font-family:monospace;color:#0071e3">%s</td><td>%s</td><td onclick="navigator.clipboard.writeText('%s').then(()=>alert('已复制'))" style="cursor:pointer;color:blue" title="点击复制">%s</td></tr>`,
-			rowNum, rec.GenerateTime, rec.MachineID, rec.ExpiryDate, rec.LicenseCode, short)
+		rowsHtml += fmt.Sprintf(`<tr><td style="text-align:center;color:#888;font-weight:bold">%d</td><td>%s</td><td style="font-family:monospace;color:#0071e3">%s</td><td>%s</td><td onclick="navigator.clipboard.writeText('%s').then(()=>alert('已复制'))" style="cursor:pointer;color:blue" title="点击复制">%s</td></tr>`, rowNum, rec.GenerateTime, rec.MachineID, rec.ExpiryDate, rec.LicenseCode, short)
 	}
 
 	totalPages := int(math.Ceil(float64(total) / float64(PageSize)))
@@ -330,8 +343,7 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	html := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>历史记录</title>
 	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}</style></head><body>
-	<div class="card"><h2 style="display:flex;justify-content:space-between">📜 历史记录 <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2>
-		<table><thead><tr><th style="width:50px;text-align:center">序号</th><th>时间</th><th>机器码</th><th>到期</th><th>激活码</th></tr></thead><tbody>%s</tbody></table>%s</div></body></html>`, rowsHtml, navHtml)
+	<div class="card"><h2 style="display:flex;justify-content:space-between">📜 历史记录 <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2><table><thead><tr><th style="width:50px;text-align:center">序号</th><th>时间</th><th>机器码</th><th>到期</th><th>激活码</th></tr></thead><tbody>%s</tbody></table>%s</div></body></html>`, rowsHtml, navHtml)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }
@@ -344,12 +356,10 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 
 	code, err := generateLicenseCore(req.MachineID, req.Expiry)
 	if err != nil { log.Printf("生成失败: %v", err); http.Error(w, err.Error(), 500); return }
-
-	saveData(req.MachineID, req.Expiry, code) // 🔥 同时保存历史和机器码
+	saveData(req.MachineID, req.Expiry, code)
 	w.Write([]byte(code))
 }
 
-// 删除历史 API
 func handleDeleteHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" { http.Error(w, "Method Not Allowed", 405); return }
 	var req DeleteRequest
@@ -363,7 +373,6 @@ func handleDeleteHistory(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(fmt.Sprintf("✅ 成功删除序号: %d", req.No)))
 }
 
-// 🔥 新增：删除机器码 API
 func handleDeleteMachine(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" { http.Error(w, "Method Not Allowed", 405); return }
 	var req DeleteRequest
@@ -375,50 +384,33 @@ func handleDeleteMachine(w http.ResponseWriter, r *http.Request) {
 	newMachines := make([]MachineRecord, 0, len(machineList))
 	found := false
 	for _, m := range machineList {
-		if m.MachineID == req.MachineID {
-			found = true
-			continue
-		}
+		if m.MachineID == req.MachineID { found = true; continue }
 		newMachines = append(newMachines, m)
 	}
-
 	if !found { http.Error(w, "机器码未找到", 404); return }
-
 	machineList = newMachines
 	if f, err := os.Create(machineFile); err == nil { json.NewEncoder(f).Encode(machineList); f.Close() }
 	w.Write([]byte("✅ 机器码已删除"))
 }
 
-// 🔥 修改：统一保存逻辑 (保存历史 + 保存机器码)
 func saveData(mid, expiry, code string) {
 	mutex.Lock(); defer mutex.Unlock()
 	nowStr := time.Now().Format("2006-01-02 15:04:05")
-
-	// 1. 保存历史
 	rec := HistoryRecord{GenerateTime: nowStr, MachineID: mid, ExpiryDate: expiry, LicenseCode: code}
 	historyList = append(historyList, rec)
 	if f, err := os.Create(historyFile); err == nil { json.NewEncoder(f).Encode(historyList); f.Close() }
 
-	// 2. 保存机器码 (去重)
 	found := false
 	for i, m := range machineList {
-		if m.MachineID == mid {
-			machineList[i].LastSeen = nowStr // 更新时间
-			found = true
-			break
-		}
+		if m.MachineID == mid { machineList[i].LastSeen = nowStr; found = true; break }
 	}
-	if !found {
-		machineList = append(machineList, MachineRecord{MachineID: mid, LastSeen: nowStr})
-	}
+	if !found { machineList = append(machineList, MachineRecord{MachineID: mid, LastSeen: nowStr}) }
 	if f, err := os.Create(machineFile); err == nil { json.NewEncoder(f).Encode(machineList); f.Close() }
 }
 
 func loadData() {
 	mutex.Lock(); defer mutex.Unlock()
-	// 加载历史
 	if f, err := os.Open(historyFile); err == nil { json.NewDecoder(f).Decode(&historyList); f.Close() }
-	// 加载机器码
 	if f, err := os.Open(machineFile); err == nil { json.NewDecoder(f).Decode(&machineList); f.Close() }
 }
 
