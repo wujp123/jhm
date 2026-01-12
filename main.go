@@ -24,7 +24,7 @@ import (
 
 // ================= 全局配置 =================
 
-var SecurityToken = getEnv("SECURITY_TOKEN", "88888888")
+var SecurityToken = getEnv("SECURITY_TOKEN", "123456")
 const PageSize = 20
 
 // ================= 数据结构 =================
@@ -169,7 +169,6 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 
 	now := time.Now().In(loc)
 	maxAllowed := now.AddDate(0, 1, 0)
-	// 允许误差 24 小时，防止跨天导致的边界问题
 	if t.After(maxAllowed.Add(24 * time.Hour)) {
 		return "", fmt.Errorf("❌ 有效期限制：不能超过1个月。\n当前最晚可签发至: %s", maxAllowed.Format("2006-01-02"))
 	}
@@ -203,8 +202,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		#res{margin-top:20px;word-break:break-all;padding:10px;background:#eee;border-radius:6px;display:none;font-family:monospace}
 		.link-box{margin-bottom:15px;text-align:right;font-size:12px}
 		a{color:#666;text-decoration:none;margin-left:10px} a:hover{color:#0071e3}
-
-		/* 🔥 新增快捷标签样式 */
 		.tags { display: flex; gap: 8px; margin-bottom: 5px; }
 		.tag { padding: 4px 10px; border-radius: 15px; background: #eef6ff; color: #0071e3; font-size: 12px; cursor: pointer; border: 1px solid #dcebfa; user-select: none; transition: all 0.2s; }
 		.tag:hover { background: #0071e3; color: white; }
@@ -214,11 +211,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		<a href="#" onclick="goPage('/machines');return false">💻 机器管理</a>
 		<a href="#" onclick="goPage('/history');return false">📜 生成记录</a>
 	</div>
-
-	<label>鉴权Token</label><input type="password" id="token" placeholder="输入密码">
+	<label>鉴权Token</label><input type="password" id="token" placeholder="默认为 123456">
 	<label>机器码</label><input type="text" id="mid" placeholder="客户机器码">
-
-	<!-- 🔥 快捷日期选择区 -->
 	<label>到期日期</label>
 	<div class="tags">
 		<div class="tag" onclick="addDate(1)">+1天</div>
@@ -227,25 +221,11 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		<div class="tag" onclick="addMonth(1)">+1月</div>
 	</div>
 	<input type="date" id="date">
-
 	<button onclick="gen()" id="btn">生成激活码</button><div id="res" onclick="copy(this)"></div></div>
-
 	<script>
-	// 默认设置为当天
 	document.getElementById('date').valueAsDate = new Date();
-
-	// 🔥 日期计算函数
-	function addDate(days) {
-		const d = new Date();
-		d.setDate(d.getDate() + days);
-		document.getElementById('date').valueAsDate = d;
-	}
-	function addMonth(months) {
-		const d = new Date();
-		d.setMonth(d.getMonth() + months);
-		document.getElementById('date').valueAsDate = d;
-	}
-
+	function addDate(days) { const d = new Date(); d.setDate(d.getDate() + days); document.getElementById('date').valueAsDate = d; }
+	function addMonth(months) { const d = new Date(); d.setMonth(d.getMonth() + months); document.getElementById('date').valueAsDate = d; }
 	if(localStorage.getItem('lt')) document.getElementById('token').value = localStorage.getItem('lt');
 	function goPage(path){var t=document.getElementById('token').value;if(!t)return alert('请输入Token');location.href=path+'?token='+t}
 	async function gen(){
@@ -293,14 +273,31 @@ func handleMachines(w http.ResponseWriter, r *http.Request) {
 	for i := len(machineList) - 1; i >= 0; i-- {
 		count++
 		rec := machineList[i]
-		rowsHtml += fmt.Sprintf(`<tr><td style="text-align:center;color:#888">%d</td><td style="font-family:monospace;color:#0071e3">%s</td><td>%s</td><td style="text-align:center"><button onclick="delMachine('%s')" class="del-btn">删除</button></td></tr>`, count, rec.MachineID, rec.LastSeen, rec.MachineID)
+		rowsHtml += fmt.Sprintf(`
+			<tr>
+				<td style="text-align:center;color:#888">%d</td>
+				<td style="font-family:monospace;color:#0071e3">%s</td>
+				<td>%s</td>
+				<td style="text-align:center">
+					<button onclick="copyText('%s')" class="copy-btn">复制</button>
+					<button onclick="delMachine('%s')" class="del-btn">删除</button>
+				</td>
+			</tr>`,
+			count, rec.MachineID, rec.LastSeen, rec.MachineID, rec.MachineID)
 	}
 	mutex.Unlock()
 
 	html := fmt.Sprintf(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>机器码管理</title>
-	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}.del-btn{background:#fff;border:1px solid #ff3b30;color:#ff3b30;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px}.del-btn:hover{background:#ff3b30;color:white}</style></head><body>
-	<div class="card"><h2 style="display:flex;justify-content:space-between">💻 机器管理 (%d) <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2><table><thead><tr><th style="width:50px;text-align:center">#</th><th>机器码</th><th>最后生成时间</th><th style="width:60px;text-align:center">操作</th></tr></thead><tbody>%s</tbody></table></div>
-	<script>async function delMachine(mid){if(!confirm('确定要删除该机器码记录吗？'))return;try {let res = await fetch('/api/machines/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},body: JSON.stringify({token: '%s', machine_id: mid})});if(res.ok) location.reload(); else alert(await res.text());} catch(e){alert(e)}}</script></body></html>`, len(machineList), rowsHtml, token)
+	<style>body{font-family:-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:10px;background:#f5f5f7}.card{background:white;padding:20px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}table{width:100%%;border-collapse:collapse;margin-top:10px;font-size:14px}th{text-align:left;background:#fafafa;padding:10px;border-bottom:2px solid #eee}td{padding:12px 10px;border-bottom:1px solid #f5f5f5;color:#333}tr:hover{background:#f9f9f9}
+	.del-btn{background:#fff;border:1px solid #ff3b30;color:#ff3b30;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px} .del-btn:hover{background:#ff3b30;color:white}
+	/* 🔥 新增复制按钮样式 */
+	.copy-btn{background:#fff;border:1px solid #0071e3;color:#0071e3;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px;margin-right:6px} .copy-btn:hover{background:#0071e3;color:white}
+	</style></head><body>
+	<div class="card"><h2 style="display:flex;justify-content:space-between">💻 机器管理 (%d) <a href="/" style="font-size:14px;color:#0071e3;text-decoration:none">返回首页</a></h2><table><thead><tr><th style="width:50px;text-align:center">#</th><th>机器码</th><th>最后生成时间</th><th style="width:110px;text-align:center">操作</th></tr></thead><tbody>%s</tbody></table></div>
+	<script>
+	function copyText(t){navigator.clipboard.writeText(t).then(()=>alert("已复制"))}
+	async function delMachine(mid){if(!confirm('确定要删除该机器码记录吗？'))return;try {let res = await fetch('/api/machines/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},body: JSON.stringify({token: '%s', machine_id: mid})});if(res.ok) location.reload(); else alert(await res.text());} catch(e){alert(e)}}
+	</script></body></html>`, len(machineList), rowsHtml, token)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }
