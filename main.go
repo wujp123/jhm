@@ -79,23 +79,32 @@ func main() {
 	loadData()
 	checkKeySource()
 
-	http.HandleFunc("/", handleIndex)
-	http.HandleFunc("/history", handleHistory)
-	http.HandleFunc("/machines", handleMachines)
-	http.HandleFunc("/setup", handleSetup)
+	mux := http.NewServeMux()
 
-	http.HandleFunc("/api/generate", handleAPI)
-	http.HandleFunc("/api/delete", handleDeleteHistory)
-	http.HandleFunc("/api/machines/delete", handleDeleteMachine)
+	mux.HandleFunc("/", handleIndex)
+	mux.HandleFunc("/history", handleHistory)
+	mux.HandleFunc("/machines", handleMachines)
+	mux.HandleFunc("/setup", handleSetup)
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/generate", handleAPI)
+	mux.HandleFunc("/api/delete", handleDeleteHistory)
+	mux.HandleFunc("/api/machines/delete", handleDeleteMachine)
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
 
-	port := getEnv("PORT", "80")
-	log.Printf("🚀 服务已启动，监听端口 :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	// 🔥 同时监听两个端口
+	go func() {
+		log.Println("🚀 Listening on :8080 (container port)")
+		if err := http.ListenAndServe(":8080", mux); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	log.Println("🚀 Listening on :80 (health check)")
+	if err := http.ListenAndServe(":80", mux); err != nil {
 		log.Fatal(err)
 	}
 }
