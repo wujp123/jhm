@@ -1,9 +1,6 @@
 # 1. 构建阶段
 FROM golang:1.22-alpine AS builder
-
 WORKDIR /app
-
-# 禁用 CGO
 ENV CGO_ENABLED=0
 ENV GOOS=linux
 
@@ -12,24 +9,23 @@ COPY go.mod ./
 RUN go mod download
 
 COPY *.go ./
-RUN go build -o server main.go
+# 编译时去除调试信息，减小体积
+RUN go build -ldflags="-s -w" -o server main.go
 
 # 2. 运行阶段
 FROM alpine:latest
 
-# 安装基础库和时区
-RUN apk --no-cache add tzdata ca-certificates
+# 安装基础库、时区、以及 curl (用于容器内自测)
+RUN apk --no-cache add tzdata ca-certificates curl
 ENV TZ=Asia/Shanghai
 
 WORKDIR /app
 
-# 从构建阶段复制
+# 复制二进制文件
 COPY --from=builder /app/server .
 
-# 🔥 强制设置环境变量，防止外部干扰
-ENV PORT=8080
-
-# 暴露端口
+# 🔥 不要设置 ENV PORT，让代码自己读取系统注入的
+# EXPOSE 只是声明，不是强制
 EXPOSE 8080
 
 # 启动命令
