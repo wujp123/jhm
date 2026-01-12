@@ -32,6 +32,7 @@ ENV TZ=Asia/Shanghai
 # 从构建阶段复制二进制文件
 COPY --from=builder /app/server .
 
+ENV PORT=8080
 # 🔥 关键修改：不要设置 ENV PORT=80，也不要 EXPOSE 80
 # 改回 8080 只是作为一个默认提示，实际端口由 Deployra 决定
 EXPOSE 8080
