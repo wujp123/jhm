@@ -16,6 +16,7 @@ RUN apk --no-cache add tzdata
 ENV TZ=Asia/Shanghai
 COPY --from=builder /app/server .
 
+RUN setcap 'cap_net_bind_service=+ep' /root/server
 # --- 修改这里：改为暴露 80 ---
 EXPOSE 80
 
