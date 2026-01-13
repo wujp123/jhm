@@ -246,7 +246,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		<a href="#" onclick="goPage('/machines');return false">💻 机器管理</a>
 		<a href="#" onclick="goPage('/history');return false">📜 生成记录</a>
 	</div>
-	<label>鉴权Token</label><input type="password" id="token" placeholder="默认为 123456">
+	<label>鉴权Token</label><input type="password" id="token" placeholder="请输入密码">
 	<label>机器码</label><input type="text" id="mid" placeholder="客户机器码">
 	<label>到期日期</label>
 	<div class="tags">
