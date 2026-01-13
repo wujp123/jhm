@@ -262,7 +262,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	function addDate(days) { const d = new Date(); d.setDate(d.getDate() + days); document.getElementById('date').valueAsDate = d; }
 	function addMonth(months) { const d = new Date(); d.setMonth(d.getMonth() + months); document.getElementById('date').valueAsDate = d; }
 	if(localStorage.getItem('lt')) document.getElementById('token').value = localStorage.getItem('lt');
-	function goPage(path){var t=document.getElementById('token').value;if(!t)return alert('请输入Token');location.href=path+'?token='+t}
+	function goPage(path){var t=document.getElementById('token').value;if(!t)return alert('请输入密码');location.href=path+'?token='+t}
 	async function gen(){
 		var t=document.getElementById('token').value, m=document.getElementById('mid').value, d=document.getElementById('date').value;
 		if(!t||!m||!d)return alert('请填写完整');
