@@ -15,6 +15,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -22,64 +23,74 @@ import (
 	"time"
 )
 
-// ... (省略部分结构体定义，保持不变，下面是关键修改) ...
+// ================= 全局配置 =================
 
-// ================= 数据结构 (保持不变) =================
+var (
+	SecurityToken = getEnv("SECURITY_TOKEN", "123456")
+	TgBotToken    = os.Getenv("TELEGRAM_BOT_TOKEN")
+	TgChatID      = os.Getenv("TELEGRAM_CHAT_ID") // 支持逗号分隔: "id1,id2,id3"
+)
+
+const PageSize = 20
+
+// ================= 数据结构 =================
+
 type LicenseData struct {
 	MachineID string `json:"machine_id"`
 	ExpiryUTC int64  `json:"expiry_utc"`
 }
+
 type License struct {
 	Data      string `json:"data"`
 	Signature string `json:"signature"`
 }
+
 type GenerateRequest struct {
 	Token     string `json:"token"`
 	MachineID string `json:"machine_id"`
 	Expiry    string `json:"expiry"`
 }
+
 type DeleteRequest struct {
 	Token     string `json:"token"`
 	No        int    `json:"no,omitempty"`
 	MachineID string `json:"machine_id,omitempty"`
 }
+
 type HistoryRecord struct {
 	GenerateTime string `json:"generate_time"`
 	MachineID    string `json:"machine_id"`
 	ExpiryDate   string `json:"expiry_date"`
 	LicenseCode  string `json:"license_code"`
 }
+
 type MachineRecord struct {
 	MachineID string `json:"machine_id"`
 	LastSeen  string `json:"last_seen"`
 }
 
+// ================= 全局存储 =================
+
 var (
-	SecurityToken = getEnv("SECURITY_TOKEN", "123456")
 	historyList []HistoryRecord
 	machineList []MachineRecord
 	historyFile = "history.json"
 	machineFile = "machines.json"
 	mutex       sync.Mutex
-	PageSize    = 20
 )
 
-// ================= 主程序入口 (调试版) =================
+// ================= 主程序入口 =================
 
 func main() {
-	// 🔥 1. 强制打印启动日志到控制台
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Println(">>> 正在启动应用...")
 
-	// 🔥 2. 安全加载数据（防止因文件权限崩溃）
 	safeLoadData()
 
-	// 🔥 3. 检查环境变量（调试用）
-	log.Printf(">>> 环境变量检测: PORT=[%s], SECURITY_TOKEN=[%s]", os.Getenv("PORT"), os.Getenv("SECURITY_TOKEN"))
-	if os.Getenv("PRIVATE_KEY") != "" {
-		log.Printf(">>> 环境变量检测: PRIVATE_KEY 长度为 %d (已设置)", len(os.Getenv("PRIVATE_KEY")))
+	if TgBotToken != "" && TgChatID != "" {
+		log.Printf("✅ Telegram 通知已启用 (目标: %s)", TgChatID)
 	} else {
-		log.Println(">>> ⚠️ 警告: PRIVATE_KEY 环境变量为空！")
+		log.Println("⚠️ Telegram 配置未找到，将不会推送通知")
 	}
 
 	http.HandleFunc("/", handleIndex)
@@ -90,58 +101,59 @@ func main() {
 	http.HandleFunc("/api/delete", handleDeleteHistory)
 	http.HandleFunc("/api/machines/delete", handleDeleteMachine)
 
-	// 🔥 4. 健康检查接口 (必须存在)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		log.Println(">>> 收到健康检查请求 /health")
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
 
-	// 🔥 5. 端口监听逻辑
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-		log.Println(">>> PORT 变量未设置，使用默认端口: 8080")
-	}
-
+	port := getEnv("PORT", "8080")
 	log.Printf(">>> 🚀 服务准备监听: 0.0.0.0:%s", port)
-
-	// 强制监听所有网卡，防止 localhost 问题
-	err := http.ListenAndServe("0.0.0.0:"+port, nil)
-	if err != nil {
-		log.Fatalf(">>> ❌ 致命错误: 无法启动 Web 服务: %v", err)
+	if err := http.ListenAndServe("0.0.0.0:"+port, nil); err != nil {
+		log.Fatalf(">>> ❌ 致命错误: %v", err)
 	}
 }
 
-// 安全加载数据，出错了只打印不崩溃
-func safeLoadData() {
-	mutex.Lock(); defer mutex.Unlock()
-	log.Println(">>> 正在加载数据文件...")
+// ================= Telegram 多人推送逻辑 (修改版) =================
 
-	if f, err := os.Open(historyFile); err == nil {
-		json.NewDecoder(f).Decode(&historyList)
-		f.Close()
-	} else {
-		log.Printf(">>> 提示: 无法读取历史文件 (可能是第一次运行): %v", err)
+func sendTelegramNotification(machineID, expiry, tokenUsed string) {
+	if TgBotToken == "" || TgChatID == "" {
+		return
 	}
 
-	if f, err := os.Open(machineFile); err == nil {
-		json.NewDecoder(f).Decode(&machineList)
-		f.Close()
-	} else {
-		log.Printf(">>> 提示: 无法读取机器码文件: %v", err)
-	}
+	go func() {
+		apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", TgBotToken)
+
+		msg := fmt.Sprintf("🔔 <b>新激活码已生成!</b>\n\n"+
+			"💻 <b>机器码:</b> <code>%s</code>\n"+
+			"📅 <b>到期日:</b> %s\n"+
+			"🔑 <b>使用Token:</b> %s\n"+
+			"🕒 <b>时间:</b> %s",
+			machineID, expiry, tokenUsed, time.Now().Format("2006-01-02 15:04:05"))
+
+		// 🔥 关键修改：按逗号分割 ID
+		ids := strings.Split(TgChatID, ",")
+
+		for _, id := range ids {
+			// 去除空格 (防止用户填成 "id1, id2")
+			cleanID := strings.TrimSpace(id)
+			if cleanID == "" { continue }
+
+			resp, err := http.PostForm(apiURL, url.Values{
+				"chat_id":    {cleanID},
+				"text":       {msg},
+				"parse_mode": {"HTML"},
+			})
+
+			if err != nil {
+				log.Printf("❌ Telegram 推送失败 (ID: %s): %v", cleanID, err)
+			} else {
+				resp.Body.Close()
+			}
+		}
+	}()
 }
 
-// ... 下面是其他的处理函数，保持原样即可，为了篇幅我不重复粘贴所有业务逻辑 ...
-// 请保留你原来的 generateLicenseCore, handleIndex 等函数
-// 只要替换上面的 main 和 safeLoadData 即可。
-
-// 为了确保你能直接运行，这里补全核心 Handler，你可以直接复制替换整个 main.go
-
-func checkKeySource() {
-	// 调试版不需要这个检查，日志里已经打印了
-}
+// ================= 核心逻辑 =================
 
 func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	if machineID == "" || expiryStr == "" { return "", fmt.Errorf("机器码或日期为空") }
@@ -156,28 +168,22 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 		if envKey != "" { rawKey = []byte(envKey); source = "env" }
 	}
 
-	if len(rawKey) == 0 { return "", fmt.Errorf("❌ 未找到私钥。请上传 private.pem 或配置 PRIVATE_KEY") }
+	if len(rawKey) == 0 { return "", fmt.Errorf("❌ 未找到私钥") }
 
 	var block *pem.Block
 	block, _ = pem.Decode(rawKey)
 
 	if block == nil {
-		if source == "file" { return "", fmt.Errorf("本地 private.pem 文件格式错误") }
+		if source == "file" { return "", fmt.Errorf("本地文件格式错误") }
 		cleanKey := string(rawKey)
-		// 暴力清理
 		cleanKey = strings.Map(func(r rune) rune {
-			if r == '-' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
-				return r
-			}
+			if r == '-' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' { return r }
 			return -1
 		}, cleanKey)
-
-		// 移除 header/footer
 		cleanKey = strings.ReplaceAll(cleanKey, "BEGINRSAPRIVATEKEY", "")
 		cleanKey = strings.ReplaceAll(cleanKey, "ENDRSAPRIVATEKEY", "")
 		cleanKey = strings.ReplaceAll(cleanKey, "BEGINPRIVATEKEY", "")
 		cleanKey = strings.ReplaceAll(cleanKey, "ENDPRIVATEKEY", "")
-
 		var builder strings.Builder
 		builder.WriteString("-----BEGIN RSA PRIVATE KEY-----\n")
 		for i := 0; i < len(cleanKey); i += 64 {
@@ -188,7 +194,7 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 		block, _ = pem.Decode([]byte(builder.String()))
 	}
 
-	if block == nil { return "", fmt.Errorf("私钥解析失败，请检查环境变量格式") }
+	if block == nil { return "", fmt.Errorf("私钥解析失败") }
 
 	var privKey *rsa.PrivateKey
 	var err error
@@ -225,6 +231,23 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 	return base64.StdEncoding.EncodeToString(compressedData.Bytes()), nil
 }
 
+// ================= HTTP Handlers =================
+
+func handleAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" { http.Error(w, "405", 405); return }
+	var req GenerateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, err.Error(), 400); return }
+	if req.Token != SecurityToken { http.Error(w, "Token 错误", 403); return }
+
+	code, err := generateLicenseCore(req.MachineID, req.Expiry)
+	if err != nil { log.Printf("生成失败: %v", err); http.Error(w, err.Error(), 500); return }
+
+	saveData(req.MachineID, req.Expiry, code)
+	sendTelegramNotification(req.MachineID, req.Expiry, req.Token) // 推送
+
+	w.Write([]byte(code))
+}
+
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" { http.NotFound(w, r); return }
 	html := `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>License Keygen</title>
@@ -246,7 +269,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		<a href="#" onclick="goPage('/machines');return false">💻 机器管理</a>
 		<a href="#" onclick="goPage('/history');return false">📜 生成记录</a>
 	</div>
-	<label>鉴权Token</label><input type="password" id="token" placeholder="请输入密码">
+	<label>鉴权Token</label><input type="password" id="token" placeholder="默认为 123456">
 	<label>机器码</label><input type="text" id="mid" placeholder="客户机器码">
 	<label>到期日期</label>
 	<div class="tags">
@@ -262,7 +285,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	function addDate(days) { const d = new Date(); d.setDate(d.getDate() + days); document.getElementById('date').valueAsDate = d; }
 	function addMonth(months) { const d = new Date(); d.setMonth(d.getMonth() + months); document.getElementById('date').valueAsDate = d; }
 	if(localStorage.getItem('lt')) document.getElementById('token').value = localStorage.getItem('lt');
-	function goPage(path){var t=document.getElementById('token').value;if(!t)return alert('请输入密码');location.href=path+'?token='+t}
+	function goPage(path){var t=document.getElementById('token').value;if(!t)return alert('请输入Token');location.href=path+'?token='+t}
 	async function gen(){
 		var t=document.getElementById('token').value, m=document.getElementById('mid').value, d=document.getElementById('date').value;
 		if(!t||!m||!d)return alert('请填写完整');
@@ -373,6 +396,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 	code, err := generateLicenseCore(req.MachineID, req.Expiry)
 	if err != nil { log.Printf("生成失败: %v", err); http.Error(w, err.Error(), 500); return }
 	saveData(req.MachineID, req.Expiry, code)
+	sendTelegramNotification(req.MachineID, req.Expiry, req.Token)
 	w.Write([]byte(code))
 }
 
@@ -424,10 +448,11 @@ func saveData(mid, expiry, code string) {
 	if f, err := os.Create(machineFile); err == nil { json.NewEncoder(f).Encode(machineList); f.Close() }
 }
 
-func loadData() {
+func safeLoadData() {
 	mutex.Lock(); defer mutex.Unlock()
-	if f, err := os.Open(historyFile); err == nil { json.NewDecoder(f).Decode(&historyList); f.Close() }
-	if f, err := os.Open(machineFile); err == nil { json.NewDecoder(f).Decode(&machineList); f.Close() }
+	log.Println(">>> 正在加载数据文件...")
+	if f, err := os.Open(historyFile); err == nil { json.NewDecoder(f).Decode(&historyList); f.Close() } else { log.Printf(">>> 提示: 无法读取历史文件: %v", err) }
+	if f, err := os.Open(machineFile); err == nil { json.NewDecoder(f).Decode(&machineList); f.Close() } else { log.Printf(">>> 提示: 无法读取机器码文件: %v", err) }
 }
 
 func getEnv(k, def string) string { if v := os.Getenv(k); v != "" { return v }; return def }
