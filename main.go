@@ -28,7 +28,7 @@ import (
 var (
 	SecurityToken = getEnv("SECURITY_TOKEN", "123456")
 	TgBotToken    = os.Getenv("TELEGRAM_BOT_TOKEN")
-	TgChatID      = os.Getenv("TELEGRAM_CHAT_ID") // 支持逗号分隔: "id1,id2,id3"
+	TgChatID      = os.Getenv("TELEGRAM_CHAT_ID")
 )
 
 const PageSize = 20
@@ -113,7 +113,7 @@ func main() {
 	}
 }
 
-// ================= Telegram 多人推送逻辑 (修改版) =================
+// ================= Telegram 推送逻辑 =================
 
 func sendTelegramNotification(machineID, expiry, tokenUsed string) {
 	if TgBotToken == "" || TgChatID == "" {
@@ -130,15 +130,14 @@ func sendTelegramNotification(machineID, expiry, tokenUsed string) {
 			"🕒 <b>时间:</b> %s",
 			machineID, expiry, tokenUsed, time.Now().Format("2006-01-02 15:04:05"))
 
-		// 🔥 关键修改：按逗号分割 ID
+		// 支持逗号分隔多个ID
 		ids := strings.Split(TgChatID, ",")
 
 		for _, id := range ids {
-			// 去除空格 (防止用户填成 "id1, id2")
 			cleanID := strings.TrimSpace(id)
 			if cleanID == "" { continue }
 
-			resp, err := http.PostForm(apiURL, url.Values{
+			_, err := http.PostForm(apiURL, url.Values{
 				"chat_id":    {cleanID},
 				"text":       {msg},
 				"parse_mode": {"HTML"},
@@ -146,8 +145,6 @@ func sendTelegramNotification(machineID, expiry, tokenUsed string) {
 
 			if err != nil {
 				log.Printf("❌ Telegram 推送失败 (ID: %s): %v", cleanID, err)
-			} else {
-				resp.Body.Close()
 			}
 		}
 	}()
@@ -232,21 +229,6 @@ func generateLicenseCore(machineID, expiryStr string) (string, error) {
 }
 
 // ================= HTTP Handlers =================
-
-func handleAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" { http.Error(w, "405", 405); return }
-	var req GenerateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, err.Error(), 400); return }
-	if req.Token != SecurityToken { http.Error(w, "Token 错误", 403); return }
-
-	code, err := generateLicenseCore(req.MachineID, req.Expiry)
-	if err != nil { log.Printf("生成失败: %v", err); http.Error(w, err.Error(), 500); return }
-
-	saveData(req.MachineID, req.Expiry, code)
-	sendTelegramNotification(req.MachineID, req.Expiry, req.Token) // 推送
-
-	w.Write([]byte(code))
-}
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" { http.NotFound(w, r); return }
@@ -387,6 +369,7 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
+// 🔥 这里是处理生成的入口，也是发送通知的地方 (唯一的一个)
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" { http.Error(w, "405", 405); return }
 	var req GenerateRequest
@@ -395,8 +378,11 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 
 	code, err := generateLicenseCore(req.MachineID, req.Expiry)
 	if err != nil { log.Printf("生成失败: %v", err); http.Error(w, err.Error(), 500); return }
+
 	saveData(req.MachineID, req.Expiry, code)
+	// 推送 Telegram 通知
 	sendTelegramNotification(req.MachineID, req.Expiry, req.Token)
+
 	w.Write([]byte(code))
 }
 
